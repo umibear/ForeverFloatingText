@@ -1041,11 +1041,23 @@ Test("a spell's cooldown ready: told when it lasted long enough, not for a short
     At(1, function() Cast(8177); G.SetCooldown(true, false) end)
     At(16, function() G.SetCooldown(false); SIM.Fire("SPELL_UPDATE_COOLDOWN") end) -- 15 s
     At(20, function() Cast(8042); G.SetCooldown(true, false) end)
-    At(26, function() G.SetCooldown(false); SIM.Fire("SPELL_UPDATE_COOLDOWN") end) -- 6 s: shorter than 10
+    At(24, function() G.SetCooldown(false); SIM.Fire("SPELL_UPDATE_COOLDOWN") end) -- 4 s: shorter than 5
     At(30, function() Cast(8177); G.SetCooldown(true, true) end) -- only the GCD
     At(31, function() G.SetCooldown(false); SIM.Fire("SPELL_UPDATE_COOLDOWN") end)
     Run(32)
     Eq(AlertTexts(), "Grounding Totem ready!", "the long one only")
+end)
+
+Test("shortest cooldown: the old default 10 s becomes 5 s once; a chosen value stays", function()
+    NewGame({db = {cooldownMin = 10}})
+    Eq(ForeverFloatingTextDB.cooldownMin, 5, "the old default moved")
+    ForeverFloatingTextDB.cooldownMin = 10 -- picked again in the menu
+    NewGame({db = ForeverFloatingTextDB})
+    Eq(ForeverFloatingTextDB.cooldownMin, 10, "picked again: stays")
+    NewGame({db = {cooldownMin = 8}})
+    Eq(ForeverFloatingTextDB.cooldownMin, 8, "a chosen value stays")
+    NewGame()
+    Eq(ForeverFloatingTextDB.cooldownMin, 5, "a new player's")
 end)
 
 -- The author's 2026-11-12 15:06 log: the game sent no SPELL_UPDATE_COOLDOWN when a Shock's cooldown
@@ -1055,7 +1067,7 @@ Test("a cooldown's end is found without the game's update: on time, and a short 
     SIM.spells[8177] = {name = "Grounding Totem"}
     SIM.spells[8050] = {name = "Flame Shock", harmful = true}
     At(1, function() Cast(8050); G.SetCooldown(true, false) end)
-    At(7, function() G.SetCooldown(false) end) -- 6 s, and the game says nothing
+    At(5, function() G.SetCooldown(false) end) -- 4 s, and the game says nothing
     At(30, function() Cast(17364); G.SetCooldown(true, true); SIM.Fire("SPELL_UPDATE_COOLDOWN") end)
     At(31.5, function() G.SetCooldown(false); SIM.Fire("SPELL_UPDATE_COOLDOWN") end)
     At(40, function() Cast(8177); G.SetCooldown(true, false) end)

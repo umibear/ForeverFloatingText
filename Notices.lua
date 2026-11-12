@@ -229,7 +229,7 @@ local function LookCooldowns()
         local took = GetTime() - w.t
         if active == false or (active == true and gcd == true) then
             watched[id] = nil
-            if db and db.enabled and db.showCooldowns and took >= (db.cooldownMin or 10) then
+            if db and db.enabled and db.showCooldowns and took >= (db.cooldownMin or 5) then
                 Ready(w.name, FFT.SpellIconText(id), took)
             end
         elseif took > WATCH_MAX then
@@ -265,7 +265,7 @@ local function OnItemUsed(itemID)
         local ok, start, duration, enable = pcall(C_Container.GetItemCooldown, itemID)
         start, duration, enable = ok and Plain(start), ok and Plain(duration), ok and Plain(enable)
         if type(start) ~= "number" or type(duration) ~= "number" or enable ~= 1 then return end
-        if duration < (FFT.db.cooldownMin or 10) or start <= 0 then return end
+        if duration < (FFT.db.cooldownMin or 5) or start <= 0 then return end
         local left = start + duration - GetTime()
         if left <= 0 then return end
         C_Timer.After(left, function()

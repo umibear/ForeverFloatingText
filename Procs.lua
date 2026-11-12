@@ -200,7 +200,11 @@ watch:SetScript("OnEvent", function(_, event, _, a2, a3)
     end
     if event == "UNIT_AURA" or event == "UNIT_SPELLCAST_SUCCEEDED" then
         SeeForm()
-        if event == "UNIT_AURA" then C_Timer.After(0, SeeForm) end -- a form may be set after its aura
+        -- a form may be set after its aura: looked at again next frame, once per frame
+        if event == "UNIT_AURA" and not form.again then
+            form.again = true
+            C_Timer.After(0, function() form.again = false; SeeForm() end)
+        end
     end
     if #rows == 0 then return end
     if event == "PLAYER_REGEN_ENABLED" then
@@ -337,6 +341,15 @@ usable:RegisterEvent("SPELL_UPDATE_USABLE")
 usable:RegisterEvent("PLAYER_TARGET_CHANGED")
 usable:RegisterUnitEvent("UNIT_HEALTH", "target")
 usable:SetScript("OnEvent", function()
+    -- (1.31.3) a class with none of these abilities stops listening: UNIT_HEALTH "target" comes
+    -- with every hit anyone lands on your target. UnitClass is asked here, not at load.
+    local _, class = UnitClass and UnitClass("player")
+    class = Plain(class)
+    if type(class) == "string" then
+        local any = false
+        for _, e in ipairs(REACTIVE_SPELLS) do if e[2] == class then any = true end end
+        if not any then return usable:UnregisterAllEvents() end
+    end
     -- the game sends these in bursts: look once, at the end of the frame
     if lookPending then return end
     lookPending = true

@@ -86,7 +86,10 @@ FFT.DEFAULTS = {
     -- 2026-11-12, rooted: "now i just have duplicate")
     showCrowdControl = false, showDispels = true, showEmotes = true,
     ccOff2 = false,        -- set once an earlier 1.31.0 draft's saved "on" was turned off
-    showCooldowns = true, cooldownMin = 10, -- seconds a cooldown must last to be told when it's over
+    -- seconds a cooldown must last to be told when it's over; (1.31.3) 5, the author's choice after
+    -- playing with it (10 before: Shocks and Stormstrike, ~6 s, weren't told)
+    showCooldowns = true, cooldownMin = 5,
+    cooldownMin5 = false,  -- set once a saved 10 (the old default) became 5
     showExperience = true, showHonor = true, showReputation = true, showSkills = true, showCurrency = true,
     showIcons = true,      -- an icon before procs and notices whose spell or item is known
     procFont = "Fonts\\FRIZQT__.TTF",
@@ -2611,13 +2614,24 @@ end
 -- In the 1.15.2 log (18:41, 670.836 and 731.942) a damage shield (Thorns, from a passing druid)
 -- hit your target in the same frame as a hunter's Arcane / pet's Nature hit on another mob, with
 -- one line of yours, and the first to arrive took it: the hunter's was shown, yours dropped.
+-- (1.31.3) the order, as a field made once (a new function per batch before; and Lua's 200 locals)
+FFT.ClogOrder = function(a, b)
+    if a.score ~= b.score then return a.score > b.score end
+    return a.order < b.order
+end
 local function ClogResolveFrame()
     local list = clogPending
     clogPending = {}
+    -- (1.31.3) a hit alone in its batch has no one to be ordered against: its score (two more
+    -- passes over your lines and casts) only ever sorted it. In a party most batches hold one hit.
+    if #list == 1 then
+        list[1].alone = true
+        return ClogDecide(list[1])
+    end
     local target = FFT.TargetPlate()
     for i, p in ipairs(list) do
         p.order = i
-        p.alone = (#list == 1)
+        p.alone = false
         local score = 0
         if not p.hit.miss and RecentSchool(p.plate, p.hit.school, p.now) then score = score + 2 end
         local _, knows = LinesInMoment(p.now, p.hit)
@@ -2625,10 +2639,7 @@ local function ClogResolveFrame()
         if target and p.plate == target then score = score + 1 end
         p.score = score
     end
-    table.sort(list, function(a, b)
-        if a.score ~= b.score then return a.score > b.score end
-        return a.order < b.order
-    end)
+    table.sort(list, FFT.ClogOrder)
     for _, p in ipairs(list) do ClogDecide(p) end
 end
 
@@ -3892,6 +3903,10 @@ events:SetScript("OnEvent", function(_, event, ...)
             if not db.ccOff2 then -- (1.31.0) a draft saved crowd control on: off, once
                 db.showCrowdControl = false
                 db.ccOff2 = true
+            end
+            if not db.cooldownMin5 then -- (1.31.3) the old default 10 becomes the new one, once
+                if db.cooldownMin == 10 then db.cooldownMin = FFT.DEFAULTS.cooldownMin end
+                db.cooldownMin5 = true
             end
             for _, k in ipairs(FFT.LOCKED) do db[k] = FFT.DEFAULTS[k] end -- (1.23.0) not in the menu
             FFT.db = db
