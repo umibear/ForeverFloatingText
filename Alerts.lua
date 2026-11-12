@@ -458,6 +458,12 @@ end
 -- when you or your target dodge, parry or block. No cooldown info from the game: nothing shown.
 -- The 1.28.0 draft looked only when UNIT_COMBAT reported your dodge, so its alerts came late. The
 -- game sent no button glow for it in these logs; an alert from a glow and this one would show once.
+-- (1.31.2) Also looked at every 0.1 s from 1.6 to 5.8 s after each Stormstrike: a reset during its
+-- own global cooldown ends with that GCD, and the game sends no update then. The author's 2026-11-12
+-- 15:38 log: Stormstrike 114106.756, your dodge 0.33 s after (the feed's DODGE), the mob dead at
+-- 114108.457, and the reset found only at 114110.444 (3.69 s), at Skinning's cooldown update.
+-- And not shown out of combat: it would stay its whole 10 s, as leaving combat (which ends it,
+-- Procs.lua) had already happened.
 ------------------------------------------------------------------------
 local STORMSTRIKE = "Stormstrike"
 local SS_RESET_AFTER = 1.6   -- after its own global cooldown
@@ -468,6 +474,7 @@ local lastStormstrike = -100 -- when you last cast it
 local alertedFor             -- the Stormstrike whose reset was shown
 local recheckFor             -- the Stormstrike being looked at again until a late GCD ends
 local lastActive             -- its isActive as last logged
+local inFight = InCombatLockdown and InCombatLockdown() or false -- then PLAYER_REGEN_DISABLED / _ENABLED
 
 local function Logging() return ns.IsLogging and ns.IsLogging() end
 
@@ -519,6 +526,7 @@ local function CheckReset(why)
     -- (1.31.0) at the procs spot, kept there until you cast Stormstrike or leave combat (Procs.lua);
     -- before, a scrolling alert. Its own setting only: no longer under "Show ability alerts".
     if not (db and db.enabled and db.showStormstrikeReset) then return end
+    if not inFight then return Log("  out of combat: not shown") end
     -- Procs.lua is a new file in 1.31.0: after a /reload only, the game hasn't loaded it yet
     if not FFT.ProcShow then FFT:ShowAlert(STORMSTRIKE .. "!") return end
     FFT:ProcShow("stormstrike", FFT.Color("colorStormstrike"), FFT.SpellIconText(stormstrikeID or STORMSTRIKE) .. STORMSTRIKE .. "!",
@@ -544,12 +552,26 @@ probe:RegisterEvent("SPELL_UPDATE_COOLDOWN")
 probe:RegisterUnitEvent("UNIT_COMBAT", "player")
 probe:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
 probe:RegisterEvent("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE")
+probe:RegisterEvent("PLAYER_REGEN_DISABLED")
+probe:RegisterEvent("PLAYER_REGEN_ENABLED")
 probe:SetScript("OnEvent", function(_, event, a1, a2, a3)
+    if event == "PLAYER_REGEN_DISABLED" or event == "PLAYER_REGEN_ENABLED" then
+        inFight = event == "PLAYER_REGEN_DISABLED"
+        return
+    end
     if event == "UNIT_SPELLCAST_SUCCEEDED" then
         local id = Plain(a3)
         if id and Plain(C_Spell.GetSpellName(id)) == STORMSTRIKE then
             stormstrikeID = stormstrikeID or id
             lastStormstrike = GetTime()
+            local cast = lastStormstrike
+            local function Look()
+                if lastStormstrike ~= cast or alertedFor == cast then return end
+                if GetTime() - cast > SS_RESET_BEFORE then return end
+                CheckReset("looked again")
+                C_Timer.After(0.1, Look)
+            end
+            C_Timer.After(SS_RESET_AFTER, Look)
         end
         return
     end

@@ -202,7 +202,17 @@ emotes:SetScript("OnEvent", function(_, _, text, source) FFT:OnMonsterEmote(text
 -- "on the GCD"); still on its cooldown then, it's watched until the game says it isn't (on every
 -- SPELL_UPDATE_COOLDOWN). Shown if it lasted cooldownMin or longer: start and duration may be
 -- hidden, so the time is your own, from the cast.
+-- (1.31.2) Also looked at every 0.1 s while one is watched: the game sends SPELL_UPDATE_COOLDOWN
+-- when a cooldown starts, not when it ends. In the author's 2026-11-12 15:06 log each "ready" came
+-- at the next cast of anything: Flame Shock 17-33 s after its cast, Frost Shock 12-40 s, Earth
+-- Shock 19-38 s, Stormstrike 10-13 s, Blood Fury 122 s, while the game's file has Shocks cast again
+-- 6.45 s apart. And "on the GCD" counts as over: the game reports the longer of the spell's own
+-- cooldown and the GCD, so the GCD outlasting it means its own is done (Stormstrike, 2026-11-10
+-- 07:48 log). Read only after the GCD of its own cast (below), so never the cast's own GCD.
+local POLL = 0.1
+local WATCH_MAX = 900 -- seconds: a spell whose cooldown can't be read any more stops being watched
 local watched = {} -- spellID -> {t, name}
+local ticker
 local function Ready(name, icon, took)
     Log("cooldown ready: %s (%.1f s)", name, took)
     Alert(icon .. ("%s ready!"):format(name), "colorCooldown")
@@ -212,30 +222,37 @@ local function SpellCooldown(id)
     if not ok or IsSecret(info) or type(info) ~= "table" then return nil end
     return Plain(info.isActive), Plain(info.isOnGCD)
 end
+local function LookCooldowns()
+    local db = FFT.db
+    for id, w in pairs(watched) do
+        local active, gcd = SpellCooldown(id)
+        local took = GetTime() - w.t
+        if active == false or (active == true and gcd == true) then
+            watched[id] = nil
+            if db and db.enabled and db.showCooldowns and took >= (db.cooldownMin or 10) then
+                Ready(w.name, FFT.SpellIconText(id), took)
+            end
+        elseif took > WATCH_MAX then
+            watched[id] = nil
+        end
+    end
+    if ticker and not next(watched) then ticker:Cancel(); ticker = nil end
+end
 local function OnSpellCast(id)
     local name = Plain(C_Spell.GetSpellName(id))
     if type(name) ~= "string" then return end
     lastCast = {t = GetTime(), id = id, name = name}
+    watched[id] = nil -- cast again: it was ready; its new cooldown is looked at below
     local db = FFT.db
     if not (db and db.enabled and db.showCooldowns) then return end
     local t = GetTime()
     C_Timer.After(1.6, function()
         local active, gcd = SpellCooldown(id)
-        if active == true and gcd ~= true then watched[id] = {t = t, name = name} end
-    end)
-end
-local function LookCooldowns()
-    local db = FFT.db
-    for id, w in pairs(watched) do
-        local active = SpellCooldown(id)
-        if active == false then
-            watched[id] = nil
-            local took = GetTime() - w.t
-            if db and db.enabled and db.showCooldowns and took >= (db.cooldownMin or 10) then
-                Ready(w.name, FFT.SpellIconText(id), took)
-            end
+        if active == true and gcd ~= true then
+            watched[id] = {t = t, name = name}
+            if not ticker then ticker = C_Timer.NewTicker(POLL, LookCooldowns) end
         end
-    end
+    end)
 end
 
 -- An item you use: your action buttons, bags and equipped items (hooks after the game's own call)

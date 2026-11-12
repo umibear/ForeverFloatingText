@@ -147,18 +147,61 @@ function FFT:OnProcNotice()
     self:ProcShow("game", FFT.Color("colorProc"), nil, "%s", {name}, PROC_MAX)
 end
 
--- What may use the game's notice up: a cast of yours and an aura of yours removed, one frame
+-- What may use the game's notice up: a cast of yours and an aura of yours removed, one frame.
+-- (1.31.2) Not when that aura was a form the cast took you out of: casting from Ghost Wolf ends it
+-- in the cast's moment. The game's files of the author's recordings: Flame Shock 6 times, Earth Shock
+-- 4, Stormstrike and totems more, each with Ghost Wolf removed in the cast's moment; a Shock pull from
+-- Ghost Wolf had ended "Maelstrom Ready!" with all 5 stacks still up. The form is read
+-- (GetShapeshiftFormID, Ghost Wolf 16) before the cast's frame and on the next frame. Hidden in
+-- combat is how many auras went, so a spell you were seen casting with a cast bar (one the proc
+-- can make instant, as Lightning Bolt) still ends it out of a form.
 local lastUse, lastRemoval = {t = -100}, -100
+local form = {now = 0, t = -100, before = 0} -- before: the form as last seen before the frame of t
+local function SeeForm()
+    local ok, f = pcall(GetShapeshiftFormID or function() return 0 end)
+    f = ok and Plain(f)
+    if type(f) ~= "number" then f = 0 end
+    local t = GetTime()
+    if t - form.t > SAME_FRAME then form.before = form.now end
+    form.now, form.t = f, t
+end
+local function CastBars()
+    local db = FFT.db
+    if not db then return {} end
+    db.castBarSpells = db.castBarSpells or {} -- spell name -> true: seen with a cast bar
+    return db.castBarSpells
+end
 local function Used()
     if math.abs(lastUse.t - lastRemoval) > SAME_FRAME then return end
-    FFT:ProcEnd("game", ("your %s and an aura of yours removed with it"):format(lastUse.name))
+    local use = lastUse
+    if use.looked then return end -- one look per cast (a frame may bring several removals)
+    use.looked = true
+    local why = ("your %s and an aura of yours removed with it"):format(use.name)
+    SeeForm()
+    local wasIn = form.before
+    if wasIn == 0 or CastBars()[use.name] then return FFT:ProcEnd("game", why) end
+    C_Timer.After(0, function()
+        SeeForm()
+        if form.now ~= 0 then return FFT:ProcEnd("game", why) end
+        Log("proc game stays: your %s took you out of form %d, the aura removed with it", use.name, wasIn)
+    end)
 end
 
 local watch = CreateFrame("Frame")
 watch:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
+watch:RegisterUnitEvent("UNIT_SPELLCAST_START", "player")
 watch:RegisterUnitEvent("UNIT_AURA", "player")
 watch:RegisterEvent("PLAYER_REGEN_ENABLED")
 watch:SetScript("OnEvent", function(_, event, _, a2, a3)
+    if event == "UNIT_SPELLCAST_START" then
+        local name = Plain(a3) and Plain(C_Spell.GetSpellName(Plain(a3)))
+        if type(name) == "string" then CastBars()[name] = true end
+        return
+    end
+    if event == "UNIT_AURA" or event == "UNIT_SPELLCAST_SUCCEEDED" then
+        SeeForm()
+        if event == "UNIT_AURA" then C_Timer.After(0, SeeForm) end -- a form may be set after its aura
+    end
     if #rows == 0 then return end
     if event == "PLAYER_REGEN_ENABLED" then
         FFT:ProcEnd("stormstrike", "you left combat") -- it stays ready, but it's no proc any more

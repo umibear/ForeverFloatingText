@@ -648,6 +648,29 @@ Test("a reset during a late GCD shows once the GCD is over", function()
         ("shown when the GCD ended, not before (%s, ended %s)"):format(tostring(at), tostring(ended)))
 end)
 
+-- The author's 2026-11-12 15:38 log: a dodge 0.33 s after Stormstrike, inside its own GCD; the game
+-- sent no update as that GCD ended, the reset was found 3.69 s after the cast, out of combat, and
+-- "Stormstrike!" stayed 10 s
+Test("a reset inside Stormstrike's own GCD shows as the GCD ends; never out of combat", function()
+    NewGame()
+    local ended
+    At(1, function() Cast(17364); G.SetCooldown(true, true) end) -- its own GCD
+    At(1.33, function() Miss("nameplate1", "DODGE") end) -- the reset (the game says nothing more)
+    At(2.5, function() G.SetCooldown(false); ended = SIM.now end) -- the GCD over, no update
+    Run(3)
+    Eq(StormstrikeAlerts(), 1, "shown")
+    local at
+    for _, s in ipairs(G.procs) do if s.text == "Stormstrike!" then at = s.t end end
+    Ok(at and at >= ended and at <= ended + 0.15, ("as the GCD ended (%s)"):format(tostring(at)))
+    At(10, function() Cast(17364); G.SetCooldown(true, true) end)
+    At(11, function() G.SetCooldown(true, false) end)
+    At(11.5, function() SIM.Fire("PLAYER_REGEN_ENABLED") end) -- the mob died
+    At(13.5, function() G.SetCooldown(false); SIM.Fire("SPELL_UPDATE_COOLDOWN") end) -- reset found now
+    Run(25)
+    Eq(StormstrikeAlerts(), 1, "not again out of combat")
+    Eq(table.concat(G.FFT:ProcsUp(), " "), "", "nothing up")
+end)
+
 Test("its own cooldown ending, its own global cooldown, or still on cooldown: nothing", function()
     NewGame()
     At(1, function() Cast(17364); G.SetCooldown(true, true) end) -- its own GCD at the cast
@@ -712,7 +735,7 @@ Test("the game's proc notice stays at the procs spot until a spell of yours uses
     SIM.spells[403] = {name = "Lightning Bolt", harmful = true}
     At(1, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")) end)
     At(2, function() Cast(8042) end) -- Earth Shock: nothing of yours removed with it
-    At(3, function() Cast(17364); HiddenRemove() end) -- Stormstrike taking Flurry's last charge
+    At(3, function() Cast(17364); G.SetCooldown(true); HiddenRemove() end) -- Stormstrike taking Flurry's last charge
     At(4, function() HiddenRemove() end) -- an aura of yours gone, no cast
     Run(5)
     Eq(#G.procs, 1, "shown once")
@@ -1023,6 +1046,52 @@ Test("a spell's cooldown ready: told when it lasted long enough, not for a short
     At(31, function() G.SetCooldown(false); SIM.Fire("SPELL_UPDATE_COOLDOWN") end)
     Run(32)
     Eq(AlertTexts(), "Grounding Totem ready!", "the long one only")
+end)
+
+-- The author's 2026-11-12 15:06 log: the game sent no SPELL_UPDATE_COOLDOWN when a Shock's cooldown
+-- ended, so each "ready" came at the next cast of anything, 12-40 s after a 6 s cooldown
+Test("a cooldown's end is found without the game's update: on time, and a short one never told late", function()
+    NewGame()
+    SIM.spells[8177] = {name = "Grounding Totem"}
+    SIM.spells[8050] = {name = "Flame Shock", harmful = true}
+    At(1, function() Cast(8050); G.SetCooldown(true, false) end)
+    At(7, function() G.SetCooldown(false) end) -- 6 s, and the game says nothing
+    At(30, function() Cast(17364); G.SetCooldown(true, true); SIM.Fire("SPELL_UPDATE_COOLDOWN") end)
+    At(31.5, function() G.SetCooldown(false); SIM.Fire("SPELL_UPDATE_COOLDOWN") end)
+    At(40, function() Cast(8177); G.SetCooldown(true, false) end)
+    At(55, function() G.SetCooldown(false) end) -- 15 s, the game says nothing
+    At(60, function() Cast(8177); G.SetCooldown(true, false) end)
+    At(74, function() G.SetCooldown(true, true) end) -- its own cooldown over, a GCD outlasting it
+    At(75, function() G.SetCooldown(false) end)
+    Run(80)
+    Eq(AlertTexts(), "Grounding Totem ready! | Grounding Totem ready!", "the long ones only, no Flame Shock")
+    local a = {}
+    for _, s in ipairs(Shown("alerts")) do if s.text ~= "+Combat" then a[#a + 1] = s end end
+    Ok(a[1] and a[1].t >= 55 and a[1].t <= 55.15, "the first when it ended")
+    Ok(a[2] and a[2].t >= 74 and a[2].t <= 74.15, "the second as the GCD took over")
+end)
+
+-- The game's files of the author's recordings: a cast from Ghost Wolf (Flame Shock, Earth Shock,
+-- totems) removes Ghost Wolf in the cast's moment; a Shock pull had ended "Maelstrom Ready!"
+Test("a Shock out of Ghost Wolf leaves the game's proc up; a spell with a cast bar still uses it", function()
+    NewGame()
+    SIM.spells[403] = {name = "Lightning Bolt", harmful = true}
+    At(1, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")) end)
+    At(2, function() G.SetForm(16); SIM.Fire("UNIT_AURA", "player", {}) end)
+    At(5, function() HiddenRemove(); G.SetForm(nil); Cast(8042) end) -- removal first, as in the file
+    At(8, function() G.SetForm(16); SIM.Fire("UNIT_AURA", "player", {}) end)
+    At(10, function() Cast(8042); HiddenRemove(); G.SetForm(nil) end) -- the form read 16 in the frame
+    Run(12)
+    Eq(ProcsUp(), "game", "still up after both Shocks")
+    At(13, function() Cast(8042); HiddenRemove() end) -- no form: as before, taken as used
+    Run(14)
+    Eq(ProcsUp(), "", "a cast with a removal and no form still ends it")
+    At(15, function() SIM.Fire("UNIT_SPELLCAST_START", "player", "Cast-x", 403) end) -- a hard-cast bolt
+    At(17, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")) end)
+    At(18, function() G.SetForm(16); SIM.Fire("UNIT_AURA", "player", {}) end)
+    At(20, function() Cast(403); HiddenRemove(); G.SetForm(nil) end) -- the instant bolt out of Ghost Wolf
+    Run(21)
+    Eq(ProcsUp(), "", "the bolt used it up")
 end)
 
 Test("a proc notice nothing uses up goes after 30 s; with the option off, none", function()
