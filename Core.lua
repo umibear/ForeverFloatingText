@@ -75,6 +75,7 @@ FFT.DEFAULTS = {
     alertsY = 240,
     alertsSpot2 = false,   -- (1.30.4) set once the old default position (0, 120) has been moved up
     procColors2 = false,   -- (1.31.0) set once a 1.31.0 draft's saved green procs color has been moved on
+    maelstromSeen = false, -- (1.31.6) set once Maelstrom Weapon was seen on you: its notice then follows the buff (Procs.lua)
     -- (1.31.0) procs kept still at their own spot until used (Procs.lua): "Stormstrike!" (above)
     -- and the game's own proc notices ("Maelstrom Ready!"). (1.31.5) At 120, below the alerts, where
     -- the author dragged them after playing (it was 350, above the alerts' rise from 240).
@@ -3415,9 +3416,13 @@ local function CheckLowMarks(f)
             local on = v ~= nil and v ~= false
             if on and not lowWas[m.field] then
                 local now = GetTime()
-                local shown = ctHiddenByUs and MuteNotHide() and FFT.ShowAlert
+                -- (1.31.6) not while dead or a ghost: at 0 the marks stay on (the author, 2026-11-12:
+                -- "now that i died, i see mana low health low"); UnitIsDeadOrGhost isn't secret (UnitDocumentation.lua)
+                local asked, dead = pcall(UnitIsDeadOrGhost, "player")
+                dead = asked and Plain(dead) == true
+                local shown = not dead and ctHiddenByUs and MuteNotHide() and FFT.ShowAlert
                     and not (lowShownAt[m.field] and now - lowShownAt[m.field] < LOW_AGAIN)
-                Log("Blizzard's combat text: %s on%s", m.field, shown and ", shown" or "")
+                Log("Blizzard's combat text: %s on%s", m.field, shown and ", shown" or dead and ", you're dead" or "")
                 if shown then
                     lowShownAt[m.field] = now
                     -- (1.31.0) at the procs spot, kept while it lasts (something to act on now)
@@ -3431,6 +3436,25 @@ local function CheckLowMarks(f)
             lowWas[m.field] = on
         end
     end
+end
+-- (1.31.6) Dying puts both warnings away (DeathInfoDocumentation.lua: PLAYER_DEAD, PLAYER_ALIVE,
+-- PLAYER_UNGHOST). Back alive, a mark still on shows again at the next health / mana update.
+-- In a do block: this file is at Lua's limit of 200 locals.
+do
+    local death = CreateFrame("Frame")
+    death:RegisterEvent("PLAYER_DEAD")
+    death:RegisterEvent("PLAYER_ALIVE") -- also when released as a ghost: then still dead
+    death:RegisterEvent("PLAYER_UNGHOST")
+    death:SetScript("OnEvent", function(_, event)
+        if event == "PLAYER_DEAD" then
+            for _, m in ipairs(LOW_MARKS) do
+                if FFT.ProcEnd then FFT:ProcEnd("low:" .. m.field, "you died") end
+            end
+            return
+        end
+        local ok, dead = pcall(UnitIsDeadOrGhost, "player")
+        if ok and Plain(dead) == false then wipe(lowWas) end
+    end)
 end
 function FFT:ApplyBlizzardCombatTextFrame()
     local frame = _G.CombatText

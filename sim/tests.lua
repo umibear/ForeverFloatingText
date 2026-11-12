@@ -341,6 +341,34 @@ Test("low mana / health: Blizzard's frame runs unseen, its warning shows at the 
     Eq(t[3], "Health Low", "the game's words")
 end)
 
+-- (1.31.6) The author, 2026-11-12: "now that i died, i see mana low health low texts"
+Test("low mana / health: put away when you die, not shown while dead, shown again once alive if still low", function()
+    CombatText = nil -- the last test's frame: the addon would hook it at login instead of this one
+    NewGame()
+    local level, dead = {health = 1, mana = 1}, false
+    UnitIsDeadOrGhost = function(unit) return unit == "player" and dead end
+    local f = BlizzardCombatText(level)
+    G.FFT:ApplyBlizzardCombatTextFrame()
+    At(1, function() level.health = 0.15; SIM.Fire("UNIT_HEALTH", "player") end)
+    Run(1.5)
+    Eq(#LowTexts(), 1, "Health Low before dying")
+    At(2, function() level.health, level.mana, dead = 0, 0, true; SIM.Fire("PLAYER_DEAD") end)
+    At(2.1, function() SIM.Fire("UNIT_HEALTH", "player"); SIM.Fire("UNIT_POWER_UPDATE", "player", "MANA") end)
+    At(3, function() SIM.Fire("PLAYER_ALIVE") end) -- released: a ghost, still dead
+    At(3.1, function() SIM.Fire("UNIT_POWER_UPDATE", "player", "MANA") end)
+    Run(4)
+    Eq(table.concat(G.FFT:ProcsUp(), " "), "", "nothing up while dead")
+    Eq(#LowTexts(), 1, "no Mana Low for dying")
+    -- resurrected at the spirit healer, mana still low
+    At(20, function() dead, level.health, level.mana = false, 0.5, 0.1; SIM.Fire("PLAYER_UNGHOST") end)
+    At(20.1, function() SIM.Fire("UNIT_HEALTH", "player"); SIM.Fire("UNIT_POWER_UPDATE", "player", "MANA") end)
+    Run(21)
+    local t = LowTexts()
+    Eq(#t, 2, "Mana Low once alive")
+    Eq(t[2], "Mana Low", "and no Health Low at half health")
+    UnitIsDeadOrGhost = nil
+end)
+
 Test("low mana / health off: Blizzard's frame hidden as before, nothing shown", function()
     NewGame()
     ForeverFloatingTextDB.showLowWarnings = false
@@ -770,6 +798,22 @@ Test("the game's proc notice stays at the procs spot until a spell of yours uses
     for _, s in ipairs(G.shown) do Ok(s.args[1] ~= "Maelstrom Ready!", "not also as a scrolling text") end
 end)
 
+-- The author's 09:01 recording (90392.630): the Lightning Bolt's frame brought the feed's "aura
+-- ended", and UNIT_AURA's removal came 0.10 s later; the text stayed 30 s with the stacks building
+-- up again (the author, 2026-11-12: "visible even tho i had just 4 stacks")
+Test("a proc used up shows its end in the cast's frame even when the aura removal comes later", function()
+    NewGame()
+    SIM.spells[403] = {name = "Lightning Bolt", harmful = true}
+    At(1, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")) end)
+    At(2, function() Feed("SPELL_AURA_END", SIM.Secret("Flurry")) end) -- a buff gone, no cast
+    Run(3)
+    Eq(ProcsUp(), "game", "a buff ending alone doesn't end it")
+    At(4, function() Cast(403); Feed("SPELL_AURA_END", SIM.Secret("Maelstrom Ready!")) end)
+    At(4.1, function() Feed("SPELL_AURA_END", SIM.Secret("Maelstrom Weapon")); HiddenRemove() end)
+    Run(5)
+    Eq(ProcsUp(), "", "used up by the Lightning Bolt, in its frame")
+end)
+
 -- 1.31.0 draft in game (2026-11-12 09:35): the fading hid the rows' own frame on the first frame
 -- nothing faded, so "Maelstrom Ready!" showed for one frame. The stub runs no OnUpdate: done here.
 Test("a proc's text stays drawn frame after frame, and fades out once used", function()
@@ -1139,6 +1183,64 @@ Test("a proc notice nothing uses up goes after 30 s; with the option off, none",
     At(33, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")) end)
     Run(34)
     Eq(#G.procs, 1, "off: not shown")
+end)
+
+-- (1.31.6) The author, 2026-11-12: "Maelstrom Ready!" stays while swings refresh the stacks, but the
+-- text went 30 s after it showed ("if i refresh stacks at 15sec left ready! still goes away"). The
+-- game's answers here: buffs hidden in combat (a read then fails), readable out of it.
+local function Maelstrom(s)
+    C_Secrets = {ShouldAurasBeSecret = function() return s.hidden end}
+    C_UnitAuras = {GetPlayerAuraBySpellID = function(id)
+        if s.hidden then error("Auras cannot be accessed when secret while tainted") end
+        if (id == 408501 and s.ready) or (id == 408505 and s.stacks) then return {spellId = id} end
+    end}
+end
+Test("a Maelstrom notice stays while Maelstrom Ready! is on you, past 30 s, and goes with it", function()
+    NewGame()
+    local s = {hidden = true, ready = true, stacks = true}
+    Maelstrom(s)
+    At(1, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")) end) -- the 5th stack, in a fight
+    At(5, function() s.hidden = false; SIM.Fire("PLAYER_REGEN_ENABLED") end) -- the mob died, Ready! still on
+    Run(6)
+    Eq(ForeverFloatingTextDB.maelstromSeen, true, "seen with Maelstrom after the fight")
+    At(25, function() s.hidden = true; SIM.Fire("PLAYER_REGEN_DISABLED") end) -- a swing refreshes the stacks: a fight
+    Run(40)
+    Eq(ProcsUp(), "game", "past 30 s in a fight, buffs unreadable: stays")
+    At(45, function() s.hidden = false; SIM.Fire("PLAYER_REGEN_ENABLED") end)
+    Run(62)
+    Eq(ProcsUp(), "game", "out of combat with Ready! on you: stays past its next 30 s")
+    At(63, function() s.ready, s.stacks = false, false; SIM.Fire("UNIT_AURA", "player", {removedAuraInstanceIDs = {7, 8}}) end)
+    Run(64)
+    Eq(ProcsUp(), "", "gone with the buff")
+    -- run out unseen in a fight: gone once the fight is over
+    s.ready, s.stacks, s.hidden = true, true, true
+    At(70, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")) end)
+    At(80, function() s.ready, s.stacks = false, false; HiddenRemove() end)
+    Run(85)
+    Eq(ProcsUp(), "game", "in a fight its end can't be read")
+    At(86, function() s.hidden = false; SIM.Fire("PLAYER_REGEN_ENABLED") end)
+    Run(87)
+    Eq(ProcsUp(), "", "gone 0.5 s after the fight")
+    C_Secrets, C_UnitAuras = nil, nil
+end)
+
+Test("a notice of a player never seen with Maelstrom still goes after 30 s", function()
+    NewGame()
+    local s = {hidden = false, ready = false, stacks = false}
+    Maelstrom(s)
+    At(1, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")); SIM.Fire("UNIT_AURA", "player", {}) end)
+    At(5, function() SIM.Fire("UNIT_AURA", "player", {removedAuraInstanceIDs = {3}}) end)
+    Run(30.5)
+    Eq(ProcsUp(), "game", "another class's notice: not ended by a missing Ready!")
+    Run(31.5)
+    Eq(ProcsUp(), "", "gone at 30 s, as before")
+    Eq(ForeverFloatingTextDB.maelstromSeen, false, "not taken for Maelstrom")
+    -- seen with Maelstrom: Ready! missing in the notice's own frame doesn't end it (its aura comes then)
+    ForeverFloatingTextDB.maelstromSeen = true
+    At(40, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")); SIM.Fire("UNIT_AURA", "player", {}) end)
+    Run(40.2)
+    Eq(ProcsUp(), "game", "not ended in its own frame")
+    C_Secrets, C_UnitAuras = nil, nil
 end)
 
 -- The game logs the proc as a cast of yours too: a cast line in its frame with no cast of yours,
