@@ -1,0 +1,15 @@
+## Interface: 16001
+## Title: Forever Floating Text
+## Notes: Floating combat text that shows only your own numbers. /fft
+## Author: umibear
+## Version: 1.31.1
+## SavedVariables: ForeverFloatingTextDB, ForeverFloatingTextLog
+Core.lua
+Spots.lua
+Heals.lua
+Incoming.lua
+Alerts.lua
+Procs.lua
+Loot.lua
+Notices.lua
+Options.lua

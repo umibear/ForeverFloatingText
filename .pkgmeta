@@ -1,0 +1,7 @@
+# BigWigs packager settings: what the release zip holds
+package-as: ForeverFloatingText
+
+# Development files that don't belong in the addon download
+ignore:
+  - .github
+  - sim

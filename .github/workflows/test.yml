@@ -1,0 +1,27 @@
+# Runs on every push and pull request, and before every release.
+# A red X on a commit means something broke: don't tag a release until it's green.
+name: Tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_call:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Lua 5.1 (the game's) and 5.3 (the tests')
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq lua5.1 lua5.3
+
+      - name: The addon compiles for the game
+        run: luac5.1 -p Core.lua Spots.lua Heals.lua Incoming.lua Alerts.lua Procs.lua Loot.lua Notices.lua Options.lua
+
+      - name: Test suite (exact checks, sim/tests.lua)
+        run: lua5.3 sim/tests.lua
+
+      - name: "Simulator: exact counts (sim/baseline.lua), solo >= 98% shown and nothing wrong"
+        run: lua5.3 sim/run.lua --check

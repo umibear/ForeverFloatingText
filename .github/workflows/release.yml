@@ -1,0 +1,27 @@
+# Pushing a version tag (like v1.27.0) runs the tests, then builds the addon zip and
+# publishes it as a GitHub release. Tags with "beta" or "alpha" in them become pre-releases.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # lets the packager create the GitHub release
+
+jobs:
+  test:
+    uses: ./.github/workflows/test.yml
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_OAUTH: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0   # full history, so the packager finds the tags and writes a changelog
+
+      - uses: BigWigsMods/packager@v2

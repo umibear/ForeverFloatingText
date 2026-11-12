@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FFT Simulator</title>
+<!-- fengari: Lua 5.3 written in JavaScript (the game uses Lua 5.1; wowstub.lua covers the gaps) -->
+<script src="https://cdn.jsdelivr.net/npm/fengari-web@0.1.4/dist/fengari-web.js"></script>
+<style>
+  :root { --bg: #f6f6f4; --fg: #1d1d1b; --muted: #666; --line: #d8d8d2; --accent: #2f6fb3; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #1b1c1e; --fg: #e8e8e4; --muted: #9a9a96; --line: #34363a; --accent: #6ea8e8; }
+  }
+  body { background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, sans-serif; margin: 0; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  p { color: var(--muted); margin: 0 0 12px; max-width: 70ch; }
+  form { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: end; margin-bottom: 12px; }
+  label { display: flex; flex-direction: column; font-size: 12px; color: var(--muted); gap: 3px; }
+  input, textarea { font: 13px ui-monospace, monospace; background: transparent; color: var(--fg);
+    border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; }
+  textarea { width: min(100%, 720px); height: 3.2em; }
+  button { font: inherit; padding: 6px 14px; border: 0; border-radius: 4px; background: var(--accent); color: #fff; cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  pre { font: 12.5px/1.5 ui-monospace, monospace; white-space: pre-wrap; border-top: 1px solid var(--line); padding-top: 10px; overflow-x: auto; }
+</style>
+</head>
+<body>
+<h1>Forever Floating Text raid simulator</h1>
+<p>Runs the addon's real Lua files against a fake game (sim/wowstub.lua) in a scripted boss fight
+(sim/scenario.lua): you and N other players hitting one boss. Each row is a fresh run.</p>
+<form id="f">
+  <label>Others in the raid (comma list)<input id="others" value="0,5,10,20,39" size="16"></label>
+  <label>Seconds<input id="duration" value="300" size="5"></label>
+  <label>Seeds<input id="seeds" value="1,2,3" size="8"></label>
+  <label>Your swing's hit after it (s)<input id="delay" value="0.449,0.468" size="11"></label>
+  <label style="flex-basis:100%">Patches to Core.lua, one per line: <code>old text =&gt; new text</code>
+    <textarea id="patches" placeholder="SWING_MIN, SWING_MAX = 0.40, 0.55 => SWING_MIN, SWING_MAX = 0.42, 0.50"></textarea></label>
+  <button id="run" type="submit">Run</button>
+</form>
+<pre id="out">Loading…</pre>
+<script>
+const FILES = ["../Core.lua", "../Spots.lua", "../Heals.lua", "../Incoming.lua", "../Alerts.lua", "../Procs.lua",
+  "wowstub.lua", "scenario.lua"];
+const out = document.getElementById("out");
+let sources = null;
+
+async function loadSources() {
+  const s = {};
+  for (const path of FILES) {
+    const r = await fetch(path + "?t=" + Date.now());
+    if (!r.ok) throw new Error("couldn't load " + path + ": " + r.status);
+    s[path.replace(/^.*\//, "")] = await r.text();
+  }
+  return s;
+}
+
+// a Lua string literal of any text
+const luaStr = s => "[==[" + s + "]==]";
+
+function runOnce(src, config) {
+  const { lua, lauxlib, lualib, to_luastring } = fengari;
+  const L = lauxlib.luaL_newstate();
+  lualib.luaL_openlibs(L);
+  for (const [name, text] of Object.entries(src)) {
+    lua.lua_pushstring(L, to_luastring(text));
+    lua.lua_setglobal(L, to_luastring("SRC_" + name.replace(/\W/g, "_")));
+  }
+  lua.lua_pushstring(L, to_luastring(config));
+  lua.lua_setglobal(L, to_luastring("SIM_CONFIG_SRC"));
+  const boot = 'assert(load(SRC_wowstub_lua, "@wowstub.lua"))() ' +
+    'local ok, res = xpcall(assert(load(SRC_scenario_lua, "@scenario.lua")), debug.traceback) ' +
+    'return ok and res or ("ERROR " .. tostring(res))';
+  if (lauxlib.luaL_loadstring(L, to_luastring(boot)) !== lua.LUA_OK) return "load error: " + lua.lua_tojsstring(L, -1);
+  if (lua.lua_pcall(L, 0, 1, 0) !== lua.LUA_OK) return "error: " + lua.lua_tojsstring(L, -1);
+  return lua.lua_tojsstring(L, -1);
+}
+
+function configLua(o) {
+  const patches = o.patches.map(p => "{" + luaStr(p[0]) + "," + luaStr(p[1]) + "}").join(",");
+  return `return {others = ${o.others}, duration = ${o.duration}, seed = ${o.seed}, details = ${o.details},
+    swingDelay = {${o.delay.join(",")}}, patches = {${patches}}}`;
+}
+
+const nums = s => s.split(",").map(x => x.trim()).filter(Boolean).map(Number);
+
+async function run(ev) {
+  if (ev) ev.preventDefault();
+  const button = document.getElementById("run");
+  button.disabled = true;
+  out.textContent = "Running…";
+  await new Promise(r => setTimeout(r, 30));
+  try {
+    sources = await loadSources(); // fresh every run, so edits to the files show
+    const patches = document.getElementById("patches").value.split("\n")
+      .map(l => l.split("=>").map(x => x.trim())).filter(p => p.length === 2 && p[0]);
+    const others = nums(document.getElementById("others").value);
+    const seeds = nums(document.getElementById("seeds").value);
+    const duration = Number(document.getElementById("duration").value) || 300;
+    const delay = nums(document.getElementById("delay").value);
+    const lines = [];
+    const t0 = performance.now();
+    for (const n of others) {
+      for (const seed of seeds) {
+        const last = seed === seeds[seeds.length - 1] && n === others[others.length - 1];
+        lines.push(runOnce(sources, configLua({ others: n, duration, seed, details: last, delay, patches })));
+        out.textContent = lines.join("\n") + "\n…";
+        await new Promise(r => setTimeout(r, 0));
+      }
+    }
+    lines.push(`\n(${((performance.now() - t0) / 1000).toFixed(1)} s)`);
+    out.textContent = lines.join("\n");
+  } catch (e) {
+    out.textContent = "Error: " + e.message;
+  }
+  button.disabled = false;
+}
+document.getElementById("f").addEventListener("submit", run);
+run();
+</script>
+</body>
+</html>
