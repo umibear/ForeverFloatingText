@@ -1188,32 +1188,49 @@ end)
 -- (1.31.6) The author, 2026-11-12: "Maelstrom Ready!" stays while swings refresh the stacks, but the
 -- text went 30 s after it showed ("if i refresh stacks at 15sec left ready! still goes away"). The
 -- game's answers here: buffs hidden in combat (a read then fails), readable out of it.
+-- (1.31.8) As in game (2026-11-12 19:08 log): Ready! (408501) is never found by addons; Maelstrom
+-- Weapon (408505) is, with its stacks, while buffs are readable
 local function Maelstrom(s)
     C_Secrets = {ShouldAurasBeSecret = function() return s.hidden end}
-    C_UnitAuras = {GetPlayerAuraBySpellID = function(id)
+    local function Read(id)
         if s.hidden then error("Auras cannot be accessed when secret while tainted") end
-        if (id == 408501 and s.ready) or (id == 408505 and s.stacks) then return {spellId = id} end
-    end}
+        if id == 408505 and s.stacks then return {spellId = id, name = "Maelstrom Weapon", applications = s.count or s.stacks} end
+    end
+    C_UnitAuras = {GetPlayerAuraBySpellID = Read,
+        GetAuraDataByIndex = function(unit, i) if i == 1 then return Read(408505) end end}
 end
-Test("a Maelstrom notice stays past 30 s while Maelstrom Ready! is found on you or buffs can't be read", function()
+Test("a Maelstrom notice stays while Maelstrom Weapon is at 5 stacks or buffs can't be read, and goes with it", function()
     NewGame()
-    local s = {hidden = true, ready = true, stacks = true}
+    local s = {hidden = true, stacks = 5}
     Maelstrom(s)
     At(1, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")) end) -- the 5th stack, in a fight
     At(5, function() s.hidden = false; SIM.Fire("PLAYER_REGEN_ENABLED") end) -- the mob died, Ready! still on
     Run(6)
     Eq(ForeverFloatingTextDB.maelstromSeen, true, "seen with Maelstrom after the fight")
+    Eq(ProcsUp(), "game", "after the fight with 5 stacks: up")
     At(25, function() s.hidden = true; SIM.Fire("PLAYER_REGEN_DISABLED") end) -- a swing refreshes the stacks: a fight
     Run(40)
     Eq(ProcsUp(), "game", "past 30 s in a fight, buffs unreadable: stays")
     At(45, function() s.hidden = false; SIM.Fire("PLAYER_REGEN_ENABLED") end)
     Run(62)
-    Eq(ProcsUp(), "game", "out of combat with Ready! on you: stays past its next 30 s")
-    At(63, function() s.ready, s.stacks = false, false; SIM.Fire("UNIT_AURA", "player", {removedAuraInstanceIDs = {7, 8}}) end)
-    Run(90.5)
-    Eq(ProcsUp(), "game", "Ready! not found: only looked at when its time is up")
-    Run(91.5)
-    Eq(ProcsUp(), "", "then gone")
+    Eq(ProcsUp(), "game", "out of combat at 5 stacks: stays past its next 30 s")
+    -- the buff runs out out of combat (the author, 2026-11-12: the text stayed after the buff dropped)
+    At(63, function() s.stacks = nil; SIM.Fire("UNIT_AURA", "player", {removedAuraInstanceIDs = {7}}) end)
+    Run(63.5)
+    Eq(ProcsUp(), "", "gone with the buff")
+    -- used unseen in a fight, stacks built up again to 4: gone once the fight is over
+    s.stacks, s.hidden = 5, true
+    At(70, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")) end)
+    At(75, function() s.stacks = 4 end)
+    At(80, function() s.hidden = false; SIM.Fire("PLAYER_REGEN_ENABLED") end)
+    Run(81)
+    Eq(ProcsUp(), "", "4 stacks after the fight: Ready! is gone")
+    -- the stack count unreadable: Maelstrom Weapon on you is enough
+    s.stacks, s.count, s.hidden = 5, SIM.Secret(5), true
+    At(90, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")) end)
+    At(95, function() s.hidden = false; SIM.Fire("PLAYER_REGEN_ENABLED") end)
+    Run(96)
+    Eq(ProcsUp(), "game", "stacks hidden, the buff on you: up")
     C_Secrets, C_UnitAuras = nil, nil
 end)
 
@@ -1222,7 +1239,7 @@ end)
 -- later ("its constantly disappearing now")
 Test("Ready! not found by its ID after a fight doesn't end the text (18:19 log)", function()
     NewGame({db = {maelstromSeen = true}})
-    local s = {hidden = true, ready = false, stacks = true}
+    local s = {hidden = true, stacks = 5}
     Maelstrom(s)
     At(1, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")) end)
     At(4, function() s.hidden = false; SIM.Fire("PLAYER_REGEN_ENABLED") end)
@@ -1234,7 +1251,7 @@ end)
 
 Test("a notice of a player never seen with Maelstrom still goes after 30 s", function()
     NewGame()
-    local s = {hidden = false, ready = false, stacks = false}
+    local s = {hidden = false}
     Maelstrom(s)
     At(1, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")); SIM.Fire("UNIT_AURA", "player", {}) end)
     At(5, function() SIM.Fire("UNIT_AURA", "player", {removedAuraInstanceIDs = {3}}) end)
