@@ -170,6 +170,7 @@ SIM.NewFrame = NewFrame
 function Methods:RegisterEvent(event)
     self.__events[event] = true
     SIM.handlers[event] = SIM.handlers[event] or {}
+    for _, f in ipairs(SIM.handlers[event]) do if f == self then return end end -- once, as in game
     table.insert(SIM.handlers[event], self)
 end
 function Methods:RegisterUnitEvent(event, ...)

@@ -343,12 +343,17 @@ usable:RegisterUnitEvent("UNIT_HEALTH", "target")
 usable:SetScript("OnEvent", function()
     -- (1.31.3) a class with none of these abilities stops listening: UNIT_HEALTH "target" comes
     -- with every hit anyone lands on your target. UnitClass is asked here, not at load.
-    local _, class = UnitClass and UnitClass("player")
-    class = Plain(class)
+    -- the second value, the class token ("SHAMAN"): `UnitClass and UnitClass(...)` would keep only the first
+    local class = Plain(UnitClass and select(2, UnitClass("player")))
     if type(class) == "string" then
         local any = false
         for _, e in ipairs(REACTIVE_SPELLS) do if e[2] == class then any = true end end
-        if not any then return usable:UnregisterAllEvents() end
+        if not any then
+            usable:UnregisterEvent("SPELL_UPDATE_USABLE")
+            usable:UnregisterEvent("PLAYER_TARGET_CHANGED")
+            usable:UnregisterEvent("UNIT_HEALTH")
+            return
+        end
     end
     -- the game sends these in bursts: look once, at the end of the frame
     if lookPending then return end

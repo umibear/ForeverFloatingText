@@ -463,7 +463,29 @@ Test("in combat (all hidden), a totem's buff and its recall show what was learne
     Eq(#t, 4, "gained and faded, twice")
     Eq(t[3], "<Strength of Earth>", "in combat, gained")
     Eq(t[4], "<Strength of Earth> fades", "in combat, faded")
-    Ok(ForeverFloatingTextDB.auraCasts[8160].gives == "Strength of Earth", "kept in the saved variables")
+    Ok(ForeverFloatingTextDB.auraCasts["Strength of Earth Totem"].gives == "Strength of Earth", "kept in the saved variables")
+end)
+
+-- (1.31.4) each rank has a spell ID of its own (the author's game files: Searing Totem 3606,
+-- Searing Totem III 6351): what one rank learned holds for the next
+Test("a totem's buff learned by one rank shows in combat for a new rank; old ID entries move to the name", function()
+    NewGame({db = {auraCasts = {
+        [8160] = {gives = "Strength of Earth", removes = {}, totem = true}, -- saved by ID before 1.31.4
+        [8161] = {removes = {Drink = true}},                                -- its rank 2, also by ID
+        [99999] = {gives = "Something", removes = {}},                      -- no name to be read: stays
+    }}})
+    AllAuras()
+    TotemSpells()
+    SIM.spells[8161] = {name = "Strength of Earth Totem"} -- the next rank
+    At(1, function() Cast(8161); HiddenAdd() end)
+    Run(2)
+    local t = AuraTexts()
+    Eq(t[1], "<Strength of Earth>", "the new rank's buff, in combat, never learned for its ID")
+    local saved = ForeverFloatingTextDB.auraCasts
+    Eq(saved["Strength of Earth Totem"].gives, "Strength of Earth", "moved to the name")
+    Ok(saved["Strength of Earth Totem"].removes.Drink and saved["Strength of Earth Totem"].totem, "ranks merged")
+    Ok(not saved[8160] and not saved[8161], "the ID entries gone")
+    Ok(saved[99999] ~= nil, "one with no readable name kept")
 end)
 
 Test("Call of the Elements: each buff learned for its own totem, then shown in combat", function()
@@ -480,8 +502,8 @@ Test("Call of the Elements: each buff learned for its own totem, then shown in c
     Run(4)
     local t = AuraTexts()
     Eq(#t, 4, "two out of combat, two in combat")
-    Eq(ForeverFloatingTextDB.auraCasts[5394].gives, "Healing Stream", "learned by name")
-    Ok(not ForeverFloatingTextDB.auraCasts[6363], "Searing Totem gives nothing")
+    Eq(ForeverFloatingTextDB.auraCasts["Healing Stream Totem"].gives, "Healing Stream", "learned by name")
+    Ok(not ForeverFloatingTextDB.auraCasts["Searing Totem"], "Searing Totem gives nothing")
 end)
 
 Test("in combat: nothing learned, or a hidden change with no cast of yours (out of range): nothing", function()
@@ -2120,6 +2142,45 @@ Test("enemy nameplates off: said once in chat", function()
     local n = 0
     for _, l in ipairs(SIM.printed) do if l:find("enemy nameplates are off", 1, true) then n = n + 1 end end
     Eq(n, 1, "one notice")
+end)
+
+-- (1.31.3) listeners only a class or talent needs
+local function Listening(event)
+    local n = 0
+    for _, f in ipairs(SIM.handlers[event] or {}) do if f.__events[event] then n = n + 1 end end
+    return n
+end
+
+Test("a class with no reactive ability stops listening for them, with no error", function()
+    NewGame()
+    Shaman()
+    SIM.Fire("UNIT_HEALTH", "target")
+    Run(1)
+    Eq(Listening("UNIT_HEALTH"), 0, "nothing listens to your target's health")
+    Eq(Listening("SPELL_UPDATE_USABLE"), 0, "nor to usable updates")
+end)
+
+-- kept last: it leaves C_SpellBook behind (the stub has none)
+Test("without Stormstrike its resets aren't watched; learning it, or casting it, watches again", function()
+    NewGame()
+    local known = false
+    C_SpellBook = {IsSpellKnown = function(id) return id == 17364 and known end}
+    local cd, combat = Listening("SPELL_UPDATE_COOLDOWN"), Listening("UNIT_COMBAT")
+    SIM.Fire("SPELLS_CHANGED")
+    Eq(Listening("SPELL_UPDATE_COOLDOWN"), cd - 1, "no cooldown updates for it")
+    Eq(Listening("UNIT_COMBAT"), combat - 2, "no dodges and parries for it")
+    known = true
+    SIM.Fire("SPELLS_CHANGED") -- a talent learned
+    Eq(Listening("SPELL_UPDATE_COOLDOWN"), cd, "watched again")
+    Eq(Listening("UNIT_COMBAT"), combat, "watched again")
+    known = false
+    SIM.Fire("SPELLS_CHANGED")
+    At(1, function() Cast(17364); G.SetCooldown(true) end) -- the game said no, but you cast it
+    At(4.5, function() G.SetCooldown(false); SIM.Fire("SPELL_UPDATE_COOLDOWN") end)
+    Run(6)
+    Eq(Listening("SPELL_UPDATE_COOLDOWN"), cd, "watched once you cast it")
+    Eq(StormstrikeAlerts(), 1, "and its reset shown")
+    C_SpellBook = nil
 end)
 
 ------------------------------------------------------------------------

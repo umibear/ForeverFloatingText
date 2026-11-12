@@ -101,7 +101,8 @@ end
 -- whole addedAuras / removedAuraInstanceIDs is secret: only "something was added / removed" is
 -- known, in the cast's frame. So out of combat the addon learns, per spell of yours, which buff its
 -- cast adds and which it removes (one cast in the frame; with several, Call of the Elements', the
--- cast whose name starts with the buff's), kept in ForeverFloatingTextDB.auraCasts. In combat, a
+-- cast whose name starts with the buff's), kept in ForeverFloatingTextDB.auraCasts by the spell's
+-- name (1.31.4; by ID before, see Learned). In combat, a
 -- hidden add in your cast's frame (up to 0.15 s) shows the buff that cast was learned to add; a
 -- hidden removal there fades the learned ones that are up. Nothing learned: nothing shown. A buff
 -- lost in combat with no cast of yours (out of range) can't be told: no text; after combat your
@@ -134,14 +135,42 @@ local function AuraIsMine(a, t)
     return ns.IsSecret(a.isFromPlayerOrPlayerPet) and InCastFrame(t)
 end
 
-local function Learned(id, create)
+-- (1.31.4) Kept by the spell's name, not its ID: each rank of a spell has an ID of its own (the
+-- author's game files: Searing Totem 3606, Searing Totem III 6351), so a newly trained rank of a
+-- totem had to be dropped out of combat again before its buff showed in combat. Entries saved by ID
+-- before are moved to their name once (ranks of one spell merged); one whose name can't be read stays.
+local converted = false
+local function ConvertByName(saved)
+    converted = true
+    local moves = {} -- collected first: a table can't get new keys while it's being walked
+    for key, l in pairs(saved) do
+        local name = type(key) == "number" and Plain(C_Spell.GetSpellName(key))
+        if type(name) == "string" and type(l) == "table" then moves[#moves + 1] = {key, name, l} end
+    end
+    for _, m in ipairs(moves) do
+        local key, name, l = m[1], m[2], m[3]
+        saved[key] = nil
+        local into = saved[name]
+        if not into then
+            saved[name] = l
+        else
+            into.removes = into.removes or {}
+            for removed in pairs(l.removes or {}) do into.removes[removed] = true end
+            into.gives = into.gives or l.gives
+            into.totem = into.totem or l.totem
+        end
+    end
+end
+local function Learned(cast, create)
     local db = FFT.db
-    if not db or not id then return nil end
+    local key = cast and (type(cast.name) == "string" and cast.name or cast.id)
+    if not db or not key then return nil end
+    if db.auraCasts and not converted then ConvertByName(db.auraCasts) end
     if create then
         db.auraCasts = db.auraCasts or {}
-        db.auraCasts[id] = db.auraCasts[id] or {removes = {}}
+        db.auraCasts[key] = db.auraCasts[key] or {removes = {}}
     end
-    return db.auraCasts and db.auraCasts[id]
+    return db.auraCasts and db.auraCasts[key]
 end
 
 -- the one cast in the frame that the buff belongs to
@@ -239,7 +268,7 @@ local function ShowAuraChanges(t, added, removed, full, hiddenAdd, hiddenRemove)
                 if totem then totemBuffs[name] = true end
                 if type(name) == "string" then
                     local c = CastFor(casts, name)
-                    local l = c and Learned(c.id, true)
+                    local l = c and Learned(c, true)
                     if l and totem and not l.totem then l.totem = true end
                     if l and l.gives ~= name then
                         l.gives = name
@@ -255,7 +284,7 @@ local function ShowAuraChanges(t, added, removed, full, hiddenAdd, hiddenRemove)
         auraNames[id] = nil
         if name ~= nil then
             if type(name) == "string" and #casts == 1 then
-                local l = Learned(casts[1].id, true)
+                local l = Learned(casts[1], true)
                 if l and not l.removes[name] then
                     l.removes[name] = true
                     Log("  learned: %s (spell %s) removes <%s>", ns.S(casts[1].name), ns.S(casts[1].id), name)
@@ -270,7 +299,7 @@ local function ShowAuraChanges(t, added, removed, full, hiddenAdd, hiddenRemove)
     -- in combat: hidden, so only what your cast in this frame was learned to do
     if hiddenAdd and not feedAdded then
         for _, c in ipairs(casts) do
-            local l = Learned(c.id)
+            local l = Learned(c)
             if not c.usedAdd and l and l.gives then
                 c.usedAdd = true
                 if l.totem then totemBuffs[l.gives] = true end
@@ -280,7 +309,7 @@ local function ShowAuraChanges(t, added, removed, full, hiddenAdd, hiddenRemove)
     end
     if hiddenRemove and not feedRemoved then
         for _, c in ipairs(casts) do
-            local l = Learned(c.id)
+            local l = Learned(c)
             if not c.usedRemove and l and l.removes then
                 c.usedRemove = true
                 for name in pairs(l.removes) do
@@ -554,15 +583,50 @@ probe:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
 probe:RegisterEvent("SPELL_ACTIVATION_OVERLAY_GLOW_HIDE")
 probe:RegisterEvent("PLAYER_REGEN_DISABLED")
 probe:RegisterEvent("PLAYER_REGEN_ENABLED")
+probe:RegisterEvent("PLAYER_LOGIN")
+probe:RegisterEvent("SPELLS_CHANGED")
+
+-- (1.31.3) Only a character that knows Stormstrike (an Enhancement talent) listens for its resets:
+-- every nameplate's dodges and parries, every cooldown update, your own dodges. Asked with
+-- C_SpellBook.IsSpellKnown (SpellBookDocumentation.lua, Forever's API list; IsPlayerSpell isn't in
+-- it) at login and when your spells change (SPELLS_CHANGED: talents, respec). 17364 is the spell
+-- in the author's logs ("Stormstrike cooldown (update, spell 17364)" with each cast). Can't tell,
+-- or you cast it anyway: watched, as before.
+local STORMSTRIKE_SPELL = 17364
+local watching = true -- registered below, as the frames were before
+local function Watch(on)
+    if on == watching then return end
+    watching = on
+    if on then
+        avoided:RegisterEvent("UNIT_COMBAT")
+        probe:RegisterEvent("SPELL_UPDATE_COOLDOWN")
+        probe:RegisterUnitEvent("UNIT_COMBAT", "player")
+    else
+        avoided:UnregisterEvent("UNIT_COMBAT")
+        probe:UnregisterEvent("SPELL_UPDATE_COOLDOWN")
+        probe:UnregisterEvent("UNIT_COMBAT")
+    end
+    Log("Stormstrike resets: %s", on and "watched" or "not watched (you don't know Stormstrike)")
+end
+local function KnowsStormstrike()
+    if not (C_SpellBook and C_SpellBook.IsSpellKnown) then return true end
+    local ok, known = pcall(C_SpellBook.IsSpellKnown, stormstrikeID or STORMSTRIKE_SPELL)
+    known = ok and Plain(known)
+    if type(known) ~= "boolean" then return true end
+    return known
+end
+
 probe:SetScript("OnEvent", function(_, event, a1, a2, a3)
     if event == "PLAYER_REGEN_DISABLED" or event == "PLAYER_REGEN_ENABLED" then
         inFight = event == "PLAYER_REGEN_DISABLED"
         return
     end
+    if event == "PLAYER_LOGIN" or event == "SPELLS_CHANGED" then return Watch(KnowsStormstrike()) end
     if event == "UNIT_SPELLCAST_SUCCEEDED" then
         local id = Plain(a3)
         if id and Plain(C_Spell.GetSpellName(id)) == STORMSTRIKE then
             stormstrikeID = stormstrikeID or id
+            Watch(true)
             lastStormstrike = GetTime()
             local cast = lastStormstrike
             local function Look()
