@@ -165,12 +165,16 @@ function FFT:MoversShown()
     return false
 end
 
--- /fft move: all boxes at once (or all away); /fft lock: all away
-function FFT:ToggleAllMovers()
-    if self:MoversShown() then return self:LockAllMovers() end
+-- /fft move: all boxes at once (or all away); /fft lock: all away.
+-- (1.31.5) UnlockAllMovers is also the options' "Move frames" button: always out, never a flip.
+function FFT:UnlockAllMovers()
     for kind in pairs(self.SPOTS) do self:ToggleMover(kind, true, true) end
     Print("drag the boxes to where each kind of text should show. Lock them all with the Lock all button, "
         .. "a right-click on any box, or /fft lock.")
+end
+function FFT:ToggleAllMovers()
+    if self:MoversShown() then return self:LockAllMovers() end
+    self:UnlockAllMovers()
 end
 
 -- kept for older calls

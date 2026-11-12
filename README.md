@@ -49,7 +49,7 @@ the addon. Only the Combat Log stays on the addon's filter: pick another on its 
 |---|---|
 | `/fft` | Options |
 | `/fft test` | Sample numbers at every position |
-| `/fft move` | Show the six fixed positions (damage and healing, incoming and resources, alerts, buffs, procs, loot and gains) to drag them |
+| `/fft move` | Show the six fixed positions (damage and healing, incoming and resources, alerts, buffs, procs, loot and gains) to drag them; also the Move frames button on the options' General page |
 | `/fft lock` | Lock them all again (or click Lock all, or right-click any box) |
 | `/fft hide <buff>`, `/fft unhide <buff>` | Leave a buff out of the buffs position, or bring it back; `/fft hide` lists them |
 | `/fft on`, `/fft off` | Turn the addon on or off |

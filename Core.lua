@@ -76,9 +76,8 @@ FFT.DEFAULTS = {
     alertsSpot2 = false,   -- (1.30.4) set once the old default position (0, 120) has been moved up
     procColors2 = false,   -- (1.31.0) set once a 1.31.0 draft's saved green procs color has been moved on
     -- (1.31.0) procs kept still at their own spot until used (Procs.lua): "Stormstrike!" (above)
-    -- and the game's own proc notices ("Maelstrom Ready!"). Above the alerts (the author, 2026-11-12):
-    -- they start at 240 and rise to ~355; a 768-high UI's top is 384, so a 22-size row at 350 fits
-    -- (rows stack downward, into the last of the alerts' rise).
+    -- and the game's own proc notices ("Maelstrom Ready!"). (1.31.5) At 120, below the alerts, where
+    -- the author dragged them after playing (it was 350, above the alerts' rise from 240).
     showGameProcs = true,
     showReactives = true,  -- Overpower, Execute...: the game's "Reactives" notice, and while it says they can be cast
     -- (1.31.0) Notices.lua, at the alerts spot (gains with your loot)
@@ -96,13 +95,13 @@ FFT.DEFAULTS = {
     procOutline = "OUTLINE",
     procSize = 22,
     procsX = 0,
-    procsY = 350,
+    procsY = 120,
     minAmount = 0,         -- hide your damage and heal numbers below this (0 = off)
     critSound = "none",    -- a SOUNDKIT key, or "none"
     showIncomingMisses = true,
     incomingSchoolColors = false,
-    incomingX = -150,
-    incomingY = -20,
+    incomingX = -220,      -- (1.31.5) the author's places, rounded: incoming, damage, procs, loot
+    incomingY = -30,
     incomingFont = "Fonts\\FRIZQT__.TTF",
     incomingOutline = "OUTLINE",
     incomingSize = 16,
@@ -111,7 +110,7 @@ FFT.DEFAULTS = {
     showMoney = true,
     lootMinQuality = "1",  -- the lowest item quality shown: "0" Poor (gray) ... "4" Epic; quest items always
     lootX = 0,
-    lootY = -100,
+    lootY = -180,
     lootFont = "Fonts\\FRIZQT__.TTF",
     lootOutline = "OUTLINE",
     lootSize = 16,
@@ -123,8 +122,8 @@ FFT.DEFAULTS = {
     -- scrolling area, in the nameplate text's font). Your target's damage when it has no nameplate
     -- always shows at the spot.
     damageWhere = "plates",
-    damageX = 90,          -- where the heal spot was (right of your character), as old settings carry over
-    damageY = 10,
+    damageX = 230,         -- right of your character (an older DB's heal spot place carries over)
+    damageY = -30,
     hideBlizzard = true,
     matchWindow = 0.6,     -- seconds a hit and a threat rise may be apart
     useCombatLog = true,   -- tell your hits by the game's Combat Log when it can (1.15.0)

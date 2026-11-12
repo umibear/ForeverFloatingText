@@ -137,6 +137,12 @@ function ns.CreateOptions(FFT)
         "Shows your own combat text. Turning it off restores the game's own combat text settings, "
         .. "and the Combat Log's previous filter after your next /reload.", ApplyBlizzard)
     Preview()
+    -- (1.31.5, the author: /fft move as a button in the options too)
+    Header("Positions")
+    Button("Move frames", "Unlock all", function() FFT:UnlockAllMovers() end,
+        "Shows a frame for each place text appears (damage, incoming, alerts, buffs, procs, loot) to drag "
+        .. "into place. Click Lock all at the top of the screen, or right-click any frame, to lock them all. "
+        .. "Each page's Position section unlocks just its own. Same as /fft move.")
 
     -- Damage
     SubPage("Damage")
