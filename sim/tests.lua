@@ -1195,7 +1195,7 @@ local function Maelstrom(s)
         if (id == 408501 and s.ready) or (id == 408505 and s.stacks) then return {spellId = id} end
     end}
 end
-Test("a Maelstrom notice stays while Maelstrom Ready! is on you, past 30 s, and goes with it", function()
+Test("a Maelstrom notice stays past 30 s while Maelstrom Ready! is found on you or buffs can't be read", function()
     NewGame()
     local s = {hidden = true, ready = true, stacks = true}
     Maelstrom(s)
@@ -1210,17 +1210,25 @@ Test("a Maelstrom notice stays while Maelstrom Ready! is on you, past 30 s, and 
     Run(62)
     Eq(ProcsUp(), "game", "out of combat with Ready! on you: stays past its next 30 s")
     At(63, function() s.ready, s.stacks = false, false; SIM.Fire("UNIT_AURA", "player", {removedAuraInstanceIDs = {7, 8}}) end)
-    Run(64)
-    Eq(ProcsUp(), "", "gone with the buff")
-    -- run out unseen in a fight: gone once the fight is over
-    s.ready, s.stacks, s.hidden = true, true, true
-    At(70, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")) end)
-    At(80, function() s.ready, s.stacks = false, false; HiddenRemove() end)
-    Run(85)
-    Eq(ProcsUp(), "game", "in a fight its end can't be read")
-    At(86, function() s.hidden = false; SIM.Fire("PLAYER_REGEN_ENABLED") end)
-    Run(87)
-    Eq(ProcsUp(), "", "gone 0.5 s after the fight")
+    Run(90.5)
+    Eq(ProcsUp(), "game", "Ready! not found: only looked at when its time is up")
+    Run(91.5)
+    Eq(ProcsUp(), "", "then gone")
+    C_Secrets, C_UnitAuras = nil, nil
+end)
+
+-- (1.31.7) The author's 2026-11-12 18:19 log (123765.513): 0.5 s after a fight 1.31.6 ended the text,
+-- GetPlayerAuraBySpellID(408501) finding nothing, while the game's file had Ready! on to its end, 7 s
+-- later ("its constantly disappearing now")
+Test("Ready! not found by its ID after a fight doesn't end the text (18:19 log)", function()
+    NewGame({db = {maelstromSeen = true}})
+    local s = {hidden = true, ready = false, stacks = true}
+    Maelstrom(s)
+    At(1, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")) end)
+    At(4, function() s.hidden = false; SIM.Fire("PLAYER_REGEN_ENABLED") end)
+    At(5, function() SIM.Fire("UNIT_AURA", "player", {removedAuraInstanceIDs = {3}}) end) -- Flurry fades
+    Run(10)
+    Eq(ProcsUp(), "game", "still up after the fight")
     C_Secrets, C_UnitAuras = nil, nil
 end)
 
@@ -1235,11 +1243,6 @@ Test("a notice of a player never seen with Maelstrom still goes after 30 s", fun
     Run(31.5)
     Eq(ProcsUp(), "", "gone at 30 s, as before")
     Eq(ForeverFloatingTextDB.maelstromSeen, false, "not taken for Maelstrom")
-    -- seen with Maelstrom: Ready! missing in the notice's own frame doesn't end it (its aura comes then)
-    ForeverFloatingTextDB.maelstromSeen = true
-    At(40, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")); SIM.Fire("UNIT_AURA", "player", {}) end)
-    Run(40.2)
-    Eq(ProcsUp(), "game", "not ended in its own frame")
     C_Secrets, C_UnitAuras = nil, nil
 end)
 

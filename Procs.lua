@@ -16,7 +16,7 @@
 -- yours removed (UNIT_AURA "player"; in combat the removal itself is hidden, but that it happened
 -- isn't): a cast that used the proc up. Not Stormstrike: it once took Flurry's last charge in its own
 -- frame (same recording). At most PROC_MAX: the proc can't be read, so a notice never stays for good;
--- (1.31.6) except Maelstrom's, which follows its buff (MAELSTROM_READY below).
+-- (1.31.6) except Maelstrom's, whose 30 s are extended while Ready! is on you or unreadable (MAELSTROM_READY below).
 
 local ADDON, ns = ...
 local FFT = ns.FFT
@@ -28,11 +28,13 @@ local PROC_MAX = 30
 -- (1.31.6) Maelstrom (the game's files: "Maelstrom Ready!" 408501, "Maelstrom Weapon" 408505). The
 -- author, 2026-11-12: Ready! stays while swings refresh the stacks ("melee refreshes stacks"), but the
 -- text went at 30 s from when it showed, with Ready! still up. So for a player seen with Maelstrom
--- the notice follows the buff: out of combat (buffs readable) it stays while Ready! is on you and
--- goes when it isn't; in combat (unreadable) it stays until used, checked again once readable.
+-- the notice's 30 s are extended while Ready! is found on you, or while your buffs can't be read
+-- (in combat), until used. (1.31.7) Not ended by Ready! missing: in game (2026-11-12 18:19 log,
+-- 123765.513) GetPlayerAuraBySpellID(408501) found nothing after a fight while the game's file had
+-- Ready! on to its end, 7 s later; that ended the text after every fight. Which ID (or name) the
+-- client gives Ready! isn't known yet: LogBuffs below records it.
 local MAELSTROM_READY, MAELSTROM_WEAPON = 408501, 408505
 local HELD_MAX = 300         -- seconds a Maelstrom notice stays at most, unread, in a fight that never ends
-local SETTLE = 0.5           -- seconds after a notice before Ready! missing counts (its aura comes in its frame)
 -- true / false while the game lets your buffs be read, nil while it doesn't (in combat)
 local function HasAura(spellID)
     if not (C_UnitAuras and C_UnitAuras.GetPlayerAuraBySpellID) then return nil end
@@ -54,8 +56,27 @@ local function MaelstromSeen()
     end
     return db.maelstromSeen == true
 end
+-- (1.31.7, log only) your buffs by name and spell ID, and what the lookups by ID say, while readable
+local function LogBuffs(why)
+    if not (ns.IsLogging and ns.IsLogging()) then return end
+    if not (C_UnitAuras and C_UnitAuras.GetAuraDataByIndex) or HasAura(MAELSTROM_WEAPON) == nil then
+        Log("buffs at %s: can't be read now", why)
+        return
+    end
+    local parts = {}
+    pcall(function()
+        for i = 1, 40 do
+            local a = C_UnitAuras.GetAuraDataByIndex("player", i, "HELPFUL")
+            if a == nil or IsSecret(a) or type(a) ~= "table" then break end
+            parts[#parts + 1] = ("%s (spell %s)"):format(S(a.name), S(a.spellId))
+        end
+    end)
+    Log("buffs at %s: %s; by ID: 408501 %s, 408505 %s", why, table.concat(parts, ", "),
+        tostring(HasAura(MAELSTROM_READY)), tostring(HasAura(MAELSTROM_WEAPON)))
+end
 -- the game notice's time is up: more seconds to stay and why, or nil to end it
 local function GameStays(r)
+    LogBuffs("proc game's time up")
     if not MaelstromSeen() then return nil end
     local up = HasAura(MAELSTROM_READY)
     if up == true then return PROC_MAX, "Maelstrom Ready! still on you" end
@@ -247,17 +268,6 @@ function FFT.NoteProcAuraRemoved()
     Used()
 end
 
--- (1.31.6) While your buffs can be read: the notice goes once Maelstrom Ready! is no longer on you
--- (used up or run out unseen in combat). Checked on UNIT_AURA and 0.5 s after combat (as Alerts.lua
--- reads your buffs then: right at PLAYER_REGEN_ENABLED they may still be hidden).
-local function GameGone()
-    local r = Find("game")
-    if not r or r.fading or GetTime() - r.shownAt < SETTLE then return end
-    if MaelstromSeen() and HasAura(MAELSTROM_READY) == false then
-        FFT:ProcEnd("game", "Maelstrom Ready! is no longer on you")
-    end
-end
-
 local watch = CreateFrame("Frame")
 watch:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
 watch:RegisterUnitEvent("UNIT_SPELLCAST_START", "player")
@@ -278,7 +288,12 @@ watch:SetScript("OnEvent", function(_, event, _, a2, a3)
         end
     end
     if event == "PLAYER_REGEN_ENABLED" then
-        C_Timer.After(0.5, function() MaelstromSeen(); GameGone() end) -- stacks stay after a fight: learned there
+        -- stacks stay after a fight: learned there (0.5 s after, as Alerts.lua reads your buffs: right
+        -- at PLAYER_REGEN_ENABLED they may still be hidden)
+        C_Timer.After(0.5, function()
+            MaelstromSeen()
+            if Find("game") then LogBuffs("after combat, proc game up") end
+        end)
         if #rows == 0 then return end
         FFT:ProcEnd("stormstrike", "you left combat") -- it stays ready, but it's no proc any more
         return
@@ -295,7 +310,6 @@ watch:SetScript("OnEvent", function(_, event, _, a2, a3)
         return
     end
     -- UNIT_AURA: removed is a table of ids, or hidden as a whole in combat (then something was)
-    GameGone()
     local info = a2
     if IsSecret(info) or type(info) ~= "table" then return end
     local removed = info.removedAuraInstanceIDs

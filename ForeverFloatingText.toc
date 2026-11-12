@@ -2,7 +2,7 @@
 ## Title: Forever Floating Text
 ## Notes: Floating combat text that shows only your own numbers. /fft
 ## Author: umibear
-## Version: 1.31.6
+## Version: 1.31.7
 ## SavedVariables: ForeverFloatingTextDB, ForeverFloatingTextLog
 Core.lua
 Spots.lua
