@@ -22,8 +22,9 @@ as yours.
   Execute, Riposte, Counterattack, Hammer of Wrath...), Stormstrike reset
 - Items and money you loot, items in their quality color
 - Experience, honor, reputation, skill gains and currency, with your loot
-- Health / Mana Low with the procs, kept while they last (crowd control on you too, if you want it:
-  the game shows it already); icons where the spell or item is known
+- Crowd control on you with the procs, kept while it lasts, if you want it (the game shows it
+  already); icons where the spell or item is known
+- Health / Mana Low as a brief alert when you drop under 20%
 
 Keep enemy nameplates on, even with the scrolling area: the game reports hits on an enemy
 through its nameplate. With them off only your current target's damage can show (at the

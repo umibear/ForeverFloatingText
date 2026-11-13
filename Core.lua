@@ -18,6 +18,7 @@
 local ADDON, ns = ...
 local FFT = {}
 ns.FFT = FFT
+FFT.critAt = {} -- (1.31.11) plate -> when a crit of yours there was last shown
 
 FFT.DEFAULTS = {
     enabled = true,
@@ -488,6 +489,7 @@ function FFT:Show(plate, text, color, crit, opts)
     end
     t:SetTextScale(1)
     t:SetAlpha(1)
+    t.uses = (t.uses or 0) + 1 -- (1.31.9) Spots.lua SpotText: still the same text? (GetText can be hidden)
     if opts and opts.anchorX then t.anchorX, t.anchorY = opts.anchorX, opts.anchorY end
 
     local now = GetTime()
@@ -647,6 +649,7 @@ end
 -- who: "pet" when only your pet's threat vouched for it
 local function ShowHit(plate, hit, why, who)
     Log("  show %s (%s%s)%s", S(hit.text), why, who == "pet" and ", pet" or "", FFT.Which(hit))
+    if hit.crit then FFT.critAt[plate] = GetTime() end -- (1.31.11) Flurry may start (SWING_QUICK.ExtraFit)
     local st = plates[plate]
     if st then st.lastMine = GetTime() end
     if who ~= "pet" and why:find("^threat") and FFT.LearnSchool then FFT.LearnSchool(plate, hit, GetTime()) end
@@ -872,6 +875,32 @@ function SWING_QUICK.Anims(key)
     table.sort(out)
     return #out > 0 and out or nil
 end
+-- (1.31.11) The delays for a swing time not learned yet, from those learned at another swing time
+-- seen in the last minute (the same weapon, faster or slower), scaled by the swing times: Flurry and
+-- a 15% haste buff scale the delay as they scale the swing (the author's 2026-11-13 08:08 log, with
+-- the game's file: 3.60 s 0.464, hasted 3.13 s 0.403, Flurry 2.41 s 0.309, 2.77 s 0.355: each
+-- within 0.002 of 0.464 x its swing time / 3.60; the 2026-11-09 Flurry, 3.30 -> 2.95 s, 0.461 ->
+-- 0.415). Not every speed-up does (a +30% buff in the 2026-11-09 09:59 log, 2.54 s, kept 0.461),
+-- and that one stays in the plain window. Before, each new swing time waited for its own 3 swings
+-- (a Flurry swing at 0.309 dropped until then). Learned ones always win.
+function SWING_QUICK.DelaysFor(key)
+    local own = SWING_QUICK.Anims(key)
+    local s = tonumber(key)
+    if own or not s then return own end
+    local now, out = GetTime(), {}
+    for k, t in pairs(SWING_QUICK.recent) do
+        local ks = tonumber(k)
+        if k ~= key and ks and now - t <= 60 and s / ks >= 0.6 and s / ks <= 1.6 then
+            for _, d in ipairs(SWING_QUICK.Anims(k) or {}) do
+                local scaled, dup = d * s / ks, false
+                for _, o in ipairs(out) do if math.abs(o - scaled) <= 0.01 then dup = true end end
+                if not dup then out[#out + 1] = scaled end
+            end
+        end
+    end
+    table.sort(out)
+    return #out > 0 and out or nil
+end
 function SWING_QUICK.Long(anims)
     return anims and anims[#anims] >= 0.6 and anims[#anims] or nil
 end
@@ -979,6 +1008,7 @@ function SWING_QUICK.MarkExtra(sw, now)
             local hi = (first.quick == true and E.flurry or E.at) + E.after
             local expected = first.quick and E.flurry or E.at
             sw.min, sw.max, sw.expected, sw.own = lo - off, hi - off, expected - off, expected - off
+            sw.ownAnims, sw.ownSpeed = sw.anims, sw.speed -- (1.31.10) its own delays, for SWING_QUICK.ExtraFit
             sw.speed, sw.anims, sw.centers, sw.lateCenters = nil, nil, nil, nil -- nothing to learn
             Log("  the extra swing of your swing %.3f s before (Windfury Totem)", off)
             if FFT.OnWindfury then FFT:OnWindfury() end
@@ -1006,7 +1036,7 @@ function FFT:OnSwing(swingType, swingDuration)
         sw.quick = SWING_QUICK.Is(sw.speed)
         if sw.quick then sw.expected, sw.own = SWING_QUICK.own, SWING_QUICK.own end
         -- (1.29.0) the delays this weapon's swings were seen to hit after (SWING_QUICK.Anims)
-        sw.anims = SWING_QUICK.Anims(sw.speed)
+        sw.anims = SWING_QUICK.DelaysFor(sw.speed) -- (1.31.11) or scaled from another swing time
         sw.centers = sw.anims
         local long = SWING_QUICK.Long(sw.anims)
         sw.lateCenters = long and {long * SWING_QUICK.CAST_LONG_RATIO} or nil
@@ -1382,6 +1412,125 @@ function SWING_QUICK.ProcExpected(sw) return sw.quick and SWING_QUICK.proc or SW
 function SWING_QUICK.ProcBefore(sw) return sw.quick == nil and SWING_AFTER_PROC.before or SWING_AFTER_PROC.after end
 local SwingProc -- function(sw, now): the proc's moment or nil (set in the Combat Log section)
 
+-- (1.31.10) Where Windfury Totem's extra swing hits, now that the weapon enchant procs with it. The
+-- author's 2026-11-13 03:27 log (solo, enchant and totem, the game's file beside it): of 8 pairs
+-- that hit, 1.31.9 showed 2. One rule fits every pair measured on two weapons: the extra swing
+-- hits where the first swing's would if a cast had delayed it (its delay x 2.15: 0.995 for 0.461,
+-- 0.887 for 0.415, SWING_AFTER_CAST), plus the extra swing's own delay; with an enchant proc on the
+-- first swing, from 0.50 s after the proc, as the first swing's own hit is (SwingFor). From the
+-- learned delays (SWING_QUICK.Anims): 3.60 s weapon 0.464, its Flurry swings (2.77 s) 0.355.
+--   plain:             0.464 x 2.15 + 0.464 = 1.461     seen 1.459 (156662.889)
+--   enchant proc:      0.50 + 1.461 = 1.961             seen 1.953, 1.954 (156659.256, 156704.613)
+--   Flurry, proc:      0.50 + 0.355 x 3.15 = 1.619      seen 1.612, 1.613 (156688.722, 156806.762)
+--   first 3.60, extra 2.77 (Flurry from a crit in the pair's frame), Stormstrike there:
+--                      0.464 x 2.15 + 0.355 = 1.353     seen 1.351 (156685.888)
+--   2026-11-11 12:46 log, old weapon, Flurry 0.415: 1.307, seen 1.303-1.305
+-- Not fitting, left out: 1.842 after a proc of one enchant attack (156735.656). The first swing's
+-- delay is the one its hit showed when it has several (a cast-delayed one: any of them). A cast
+-- from 0.53 s before the extra's hit delays it by its own delay x 1.15 (0.534 at 0.464: 12:53 log,
+-- 17989.289, +0.527). Without learned delays, the 1.30.5 windows, moved by the proc too.
+-- Returns "now" or "late" when the hit at d (after the extra swing) fits, false when not.
+SWING_QUICK.CAST_RATIO = 1.15 -- a cast's added wait over the swing's delay (0.534 / 0.464, 0.472 / 0.415)
+function SWING_QUICK.CastAdd(d)
+    return d >= 0.6 and d * (SWING_QUICK.CAST_LONG_RATIO - 1) or d * SWING_QUICK.CAST_RATIO
+end
+-- (1.31.11) The author's 2026-11-13 08:08 log (solo, the game's file): 6 more kinds of pair.
+--   Flurry started between the two swings, by a crit of the first swing, of an enchant attack or of
+--   the extra itself: the extra hits on Flurry's delay, while its PLAYER_SWING still reads the slow
+--   swing time (1.180, 1.677, 1.195, 1.694 for 0.403 x 2.15 + 0.309 = 1.175, + 0.50 = 1.675; with
+--   Stormstrike 1.549; 03:27's 1.842 = 0.50 + 0.464 x 2.15 + 0.355 + 0.013). Flurry comes from a
+--   crit and each of these had one of yours on that mob, so after one (FFT.critAt, or this hit's
+--   own) the delays of a swing time seen in the last minute at 0.65-0.95 of the extra's are tried too.
+--   A first swing delayed by a proc not seen (Stormstrike's Windfury whose one attack missed: no line
+--   at the proc, its SPELL_MISSED 0.23 s later): the extra went from the first swing's own hit,
+--   +0.866 (173709.412: 0.911 -> 1.773). So for a first swing whose hit came late, that moment too.
+function SWING_QUICK.FlurryDelays(x)
+    local s, now, out = tonumber(x.ownSpeed), GetTime(), {}
+    if not s then return out end
+    for k, t in pairs(SWING_QUICK.recent) do
+        local r = (tonumber(k) or 0) / s
+        if now - t <= 60 and r >= 0.65 and r <= 0.95 then
+            for _, dd in ipairs(SWING_QUICK.DelaysFor(k) or {}) do out[#out + 1] = dd end
+        end
+    end
+    return out
+end
+function SWING_QUICK.ExtraFit(x, now, d, slack, hit)
+    local first, E = x.extraOf, SWING_QUICK.EXTRA
+    local off = x.t - first.t
+    local start = 0
+    local procAt = SwingProc and SwingProc(first, now)
+    if procAt then
+        local fromSwing = first.hitsFromSwing and not first.hitsFromLines
+        start = (fromSwing and 0 or (procAt - first.t)) + 0.50
+    end
+    local d1s, d2s = first.anims, x.ownAnims
+    if d1s and first.hitD and not first.hitLate then
+        local one = SWING_QUICK.Near(d1s, first.hitD - start, SWING_QUICK.ANIM_TOL + slack)
+        if one then d1s = {one} end
+    end
+    local critAt = FFT.critAt[x.plate]
+    if d2s and ((hit and hit.crit) or (critAt and critAt >= first.t - SWING_CAST_FRAME)) then
+        local more = SWING_QUICK.FlurryDelays(x)
+        if #more > 0 then
+            local all = {}
+            for _, dd in ipairs(d2s) do all[#all + 1] = dd end
+            for _, dd in ipairs(more) do all[#all + 1] = dd end
+            d2s = all
+        end
+    end
+    -- each moment with 1.30.5's margins (0.07 before, 0.05 after): 1.408 in the 12:53 log (17943.139)
+    -- is 0.044 s before 1.452; the 03:27 ones 0.002-0.008 s before theirs
+    local function Near(list, at)
+        for _, c in ipairs(list) do
+            if at >= c - E.before - slack and at <= c + E.after + slack then return c end
+        end
+    end
+    if d1s and d2s then
+        local centers, lates = {}, {}
+        for _, d1 in ipairs(d1s) do
+            for _, d2 in ipairs(d2s) do
+                local c = start + d1 + SWING_QUICK.CastAdd(d1) + d2 - off
+                centers[#centers + 1] = c
+                lates[#lates + 1] = {c = c, at = c + SWING_QUICK.CastAdd(d2)}
+                if first.hitD and first.hitLate then -- from the first swing's own (late) hit
+                    centers[#centers + 1] = first.hitD + SWING_QUICK.CastAdd(d1) + d2 - off
+                end
+            end
+        end
+        table.sort(centers)
+        x.centers, x.expected, x.own = centers, centers[1], centers[1]
+        x.min, x.max = centers[1] - E.before, centers[#centers] + E.after
+        local nearC = Near(centers, d)
+        for _, l in ipairs(lates) do
+            local cast = CastWithSwing(x, now, l.c - 0.01, l.c - 0.53)
+            if cast then
+                x.waitLate, x.lateAt = x.waitLate or cast, l.at
+                x.lateCenters = {l.at}
+                if Near({l.at}, d) and (x.waitLate == cast or not x.cands) then return "late" end
+            end
+        end
+        return nearC and "now" or false
+    end
+    -- not learned: 1.30.5's windows, from the proc when there is one
+    local lo = (first.quick == false and E.at or E.flurry) - E.before + start - off
+    local hi = (first.quick == true and E.flurry or E.at) + E.after + start - off
+    local expected = (first.quick and E.flurry or E.at) + start - off
+    x.min, x.max, x.expected, x.own = lo, hi, expected, expected
+    local cast = CastWithSwing(x, now, expected - 0.01, expected - 0.53)
+    if d >= lo - slack and d <= hi + slack then
+        if cast then x.waitLate = x.waitLate or cast end
+        return "now"
+    end
+    local late = expected + SWING_QUICK.CastExtra(x)
+    if cast and (x.waitLate or not x.cands) and d >= late - SWING_QUICK.CastBefore(x) - slack
+        and d <= late + SWING_AFTER_CAST.after + slack then
+        x.waitLate = x.waitLate or cast
+        return "late"
+    end
+    return false
+end
+
 -- (1.28.0) A cast of yours before the swing's hit opens its late window too, and the swing waits
 -- for both: a hit in the late window is the swing's (the cast delayed it), and then a hit in its
 -- normal window goes on to the other checks; with none late, the normal one is the swing's. Most
@@ -1391,7 +1540,7 @@ local SwingProc -- function(sw, now): the proc's moment or nil (set in the Comba
 -- (simulator, 5 others: 18). Returns the swing, the hit's delay, and whether it's the late window.
 -- missed (optional, 1.28.14): is the hit asked about a miss; a swing whose own line says otherwise
 -- isn't looked at (SWING_QUICK.Missed)
-local function SwingFor(now, plate, meleeOnly, missed)
+local function SwingFor(now, plate, meleeOnly, missed, hit)
     local slack = FrameSlack()
     for _, sw in ipairs(swings) do
         local d = now - sw.t
@@ -1400,8 +1549,13 @@ local function SwingFor(now, plate, meleeOnly, missed)
             local swMissed = SWING_QUICK.Missed(sw)
             fits = swMissed == nil or swMissed == missed
         end
-        local procAt = fits and not sw.used and sw.plate == plate and not (meleeOnly and sw.ranged) and SwingProc
-            and SwingProc(sw, now)
+        -- (1.31.10) Windfury Totem's extra swing goes by its own rule (SWING_QUICK.ExtraFit), never
+        -- by the plain or proc windows: the enchant's lines are in its frame too
+        local extraFit = sw.extraOf and fits and not sw.used and sw.plate == plate
+            and SWING_QUICK.ExtraFit(sw, now, d, slack, hit)
+        if extraFit then return sw, d, extraFit == "late" end
+        local procAt = not sw.extraOf and fits and not sw.used and sw.plate == plate and not (meleeOnly and sw.ranged)
+            and SwingProc and SwingProc(sw, now)
         if procAt then
             -- (1.28.11) from the swing itself when this proc's Windfury hits were all timed from
             -- the swing, not from its lines (see ExtraAttackLine)
@@ -1445,17 +1599,11 @@ local function SwingFor(now, plate, meleeOnly, missed)
                 sw.lateAt = later
                 return sw, d, true
             end
-        elseif fits and not sw.used and sw.plate == plate and not (meleeOnly and sw.ranged) then
+        elseif not sw.extraOf and fits and not sw.used and sw.plate == plate and not (meleeOnly and sw.ranged) then
             -- (1.29.0) a cast up to the weapon's longest learned delay delays it too (Stormstrike
             -- +0.570 before a 0.73 s swing, 30282.250)
             local long = SWING_QUICK.Long(sw.anims)
             local cast = not sw.ranged and CastWithSwing(sw, now, long and long - 0.01 or nil)
-            -- (1.30.5) Windfury Totem's extra swing (SWING_QUICK.MarkExtra): as a Windfury
-            -- swing's, a cast from 0.53 s before its expected hit delays it (12:53 log, Stormstrike
-            -- 0.013 s before it, the hit 0.534 s later)
-            if sw.extraOf then
-                cast = CastWithSwing(sw, now, sw.expected - 0.01, sw.expected - 0.53)
-            end
             local anim = sw.anims and SWING_QUICK.Near(sw.anims, d, SWING_QUICK.ANIM_TOL + slack)
             if (d >= sw.min - slack and d <= sw.max + slack) or anim then
                 if cast then sw.waitLate = sw.waitLate or cast end
@@ -2541,6 +2689,7 @@ end
 
 -- who: "pet" for your pet's hit (its color)
 local function ShowClogHit(p, why, who)
+    if p.hit.crit then FFT.critAt[p.plate] = GetTime() end -- (1.31.11) also when not drawn
     if plates[p.plate] == p.st or FFT.ToSpot(p.plate) then return ShowHit(p.plate, p.hit, why, who) end
     if not p.ax then
         return Log("  yours, not drawn: %s (%s; its nameplate went away)%s", S(p.hit.text), why, FFT.Which(p.hit))
@@ -2551,6 +2700,27 @@ local function ShowClogHit(p, why, who)
     if who == "pet" and db.schoolColors and not p.hit.miss then color = Color("colorPet") end
     FFT:Show(nil, p.hit.text, color, p.hit.crit, HitOpts(p.hit, {anchorX = p.ax, anchorY = p.ay, key = p.plate}))
     if p.hit.crit then FFT:CritSound() end
+end
+
+-- (1.31.11) A killing blow brings the numbers of your swings still on their way at once: the author's
+-- 2026-11-13 08:08 log (solo, the game's file), 5 physical hits 0.101-0.114 s after your kill line
+-- (PARTY_KILL), each where a swing of yours at that mob had no hit yet (173598.076, 173644.218 x2,
+-- 174089.713, 174165.566; dropped by 1.31.10). So such a hit, 0.08-0.13 s after a kill line, is
+-- the oldest of those swings'. Outside a group only: there others' swings end the same way.
+function SWING_QUICK.AfterKill(p)
+    if IsInGroup() or p.hit.school ~= 1 then return nil end
+    local kill
+    for _, m in ipairs(clogMsgs) do
+        local dt = p.now - m.t
+        if m.kind == "kill" and dt >= 0.08 and dt <= 0.13 then kill = m end
+    end
+    if not kill then return nil end
+    for _, sw in ipairs(swings) do
+        if sw.plate == p.plate and not sw.used and not sw.cands and not sw.ranged and sw.t <= kill.t + SAME_FRAME then
+            sw.used = true
+            return sw, p.now - kill.t
+        end
+    end
 end
 
 local function ClogDecide(p)
@@ -2605,6 +2775,11 @@ local function ClogDecide(p)
     -- (sim/, 300 s, seeds 1-2, 0/5/10/39 others): the same hits shown and the same wrong ones in all
     -- 8 runs, and with 39 others 76% fewer timers (12,258 -> 2,898). Heals keep theirs (Heals.lua
     -- ByCombatLog): a heal's line may come just after the heal.
+    local ksw, kd = SWING_QUICK.AfterKill(p)
+    if ksw then
+        return ShowClogHit(p, ("your %s, its number %.2fs after your killing blow"):format(
+            ksw.extraOf and "extra swing (Windfury Totem)" or "swing", kd))
+    end
     if logging then Log("  drop %s (no Combat Log line of yours with it)%s", S(p.hit.text), FFT.Which(p.hit)) end
 end
 
@@ -2700,21 +2875,28 @@ local function ResolveSwing(sw)
     -- raid, where two in a frame are more likely someone else's.
     local twin
     if best then
+        -- (1.31.11) or in the next frame, as close or not: the 2026-11-13 08:08 log, 173613.319, the
+        -- first swing's crit at proc + 0.899 and the extra's MISS 0.006 s later, both dropped as "as
+        -- close"; at 60 frames a second the next frame is 0.017 s on, no longer "as close"
         for _, cand in ipairs(group) do
-            if cand ~= best and Off(cand.d) - Off(best.d) < SWING_MARGIN then
+            if cand ~= best then
                 local x = sw.extra
+                local close = Off(cand.d) - Off(best.d) < SWING_MARGIN
                 if x and #group == 2 and not x.used and not x.cands and not IsInRaid()
-                    and math.abs(cand.now - best.now) <= SAME_FRAME then
+                    and math.abs(cand.now - best.now) <= 0.02 + FrameSlack() then -- the next frame at any rate
                     twin = cand
                     x.used = true
-                else
+                    break
+                elseif close then
                     Log("  %s: another hit as close to your swing's moment, can't tell which", S(best.hit.text))
                     best = nil
+                    break
                 end
-                break
             end
         end
     end
+    -- (1.31.10) the delay its hit showed, for its extra swing's (SWING_QUICK.ExtraFit)
+    if best then sw.hitD, sw.hitLate = best.d, anyLate end
     -- (1.28.14) a plain swing with one hit in its window teaches this weapon speed's delay
     if best and #sw.cands == 1 and not anyLate and not sw.waitLate and not sw.procAt and not sw.extraOf then
         SWING_QUICK.Learn(sw, best.d)
@@ -3103,7 +3285,7 @@ local function ClogHit(plate, hit, now)
             from == "swing" and (", %.2fs after your %s"):format(now - of.t, of.name or "swing") or ""))
     end
     if hit.school == 1 and not OwnMissLineNow(hit, now) then
-        local sw, d, late = SwingFor(now, plate, true, hit.miss == true)
+        local sw, d, late = SwingFor(now, plate, true, hit.miss == true, hit)
         if sw then return AddSwingCandidate(sw, plate, hit, now, d, late) end
         SWING_QUICK.Sight(plate, hit, now)
     end
@@ -3425,33 +3607,27 @@ local function CheckLowMarks(f)
                 Log("Blizzard's combat text: %s on%s", m.field, shown and ", shown" or dead and ", you're dead" or "")
                 if shown then
                     lowShownAt[m.field] = now
-                    -- (1.31.0) at the procs spot, kept while it lasts (something to act on now)
-                    if FFT.ProcShow then FFT:ProcShow("low:" .. m.field, {1, 0.1, 0.1}, m.text(), nil, nil, 600)
-                    else FFT:ShowAlert(m.text(), {1, 0.1, 0.1}) end -- Blizzard's color for them
+                    -- (1.31.12) a brief alert as you cross 20%, gone with the other alerts, as Blizzard's
+                    -- own (CombatText.lua: one HEALTH_LOW / MANA_LOW message per crossing, scrolling and
+                    -- fading as any). 1.31.0-1.31.11 kept it at the procs spot while under 20% (up to
+                    -- 600 s); the author, 2026-11-13: it should just show briefly.
+                    FFT:ShowAlert(m.text(), {1, 0.1, 0.1}) -- Blizzard's color for them
                 end
             elseif not on and lowWas[m.field] then
                 Log("Blizzard's combat text: %s off", m.field)
-                if FFT.ProcEnd then FFT:ProcEnd("low:" .. m.field, "back above 20%") end
             end
             lowWas[m.field] = on
         end
     end
 end
--- (1.31.6) Dying puts both warnings away (DeathInfoDocumentation.lua: PLAYER_DEAD, PLAYER_ALIVE,
--- PLAYER_UNGHOST). Back alive, a mark still on shows again at the next health / mana update.
--- In a do block: this file is at Lua's limit of 200 locals.
+-- (1.31.6) Back alive (DeathInfoDocumentation.lua: PLAYER_ALIVE, PLAYER_UNGHOST), a mark still on
+-- shows again at the next health / mana update. (Dying put the kept warnings away until 1.31.12;
+-- they are brief now.) In a do block: this file is at Lua's limit of 200 locals.
 do
     local death = CreateFrame("Frame")
-    death:RegisterEvent("PLAYER_DEAD")
     death:RegisterEvent("PLAYER_ALIVE") -- also when released as a ghost: then still dead
     death:RegisterEvent("PLAYER_UNGHOST")
-    death:SetScript("OnEvent", function(_, event)
-        if event == "PLAYER_DEAD" then
-            for _, m in ipairs(LOW_MARKS) do
-                if FFT.ProcEnd then FFT:ProcEnd("low:" .. m.field, "you died") end
-            end
-            return
-        end
+    death:SetScript("OnEvent", function()
         local ok, dead = pcall(UnitIsDeadOrGhost, "player")
         if ok and Plain(dead) == false then wipe(lowWas) end
     end)

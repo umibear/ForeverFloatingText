@@ -28,6 +28,7 @@ SIM = {
     clogOn = true,     -- C_CombatLog.AreFilteredEventsEnabled()
     spells = {},       -- id -> {name, harmful, helpful}
     cvars = {},
+    frames = {},       -- every frame and font string made, for SIM.RunOnUpdate
 }
 
 unpack = unpack or table.unpack
@@ -163,9 +164,19 @@ end
 local function NewFrame(kind, name)
     local f = setmetatable({__kind = kind, __shown = true, __scripts = {}, __events = {}}, FrameMT)
     if name then _G[name] = f end
+    SIM.frames[#SIM.frames + 1] = f
     return f
 end
 SIM.NewFrame = NewFrame
+
+-- The game calls OnUpdate every frame; the simulator only when a test asks (SIM.RunOnUpdate), so the
+-- counts don't pay for the text animation. One call = one frame that lasted `elapsed` seconds.
+function SIM.RunOnUpdate(elapsed)
+    for _, f in ipairs(SIM.frames) do
+        local fn = f.__scripts.OnUpdate
+        if fn and f.__shown then fn(f, elapsed) end
+    end
+end
 
 function Methods:RegisterEvent(event)
     self.__events[event] = true
@@ -199,14 +210,31 @@ function Methods:SetShown(v) self.__shown = v and true or false end
 function Methods:CreateFontString(name) return NewFrame("FontString", name) end
 function Methods:CreateTexture(name) return NewFrame("Texture", name) end
 function Methods:SetFont() return true end
-function Methods:SetText(text) self.__text = text end
-function Methods:GetText() return self.__text end
+-- A font string's text, as the game keeps it (SimpleFontStringAPIDocumentation): SetText and
+-- SetFormattedText with a hidden value add the "Text" secret aspect (SecretArgumentsAddAspect), and
+-- from then GetText returns a hidden value (SecretReturnsForAspect), also after a plain SetText:
+-- only SetToDefaults clears it, and that one is protected. In game a reused text that once showed a
+-- buff's hidden name failed "attempt to compare a secret string value" (2026-11-12 and -13). Here
+-- such a compare with a plain string is only false, never an error: Lua calls __eq for two tables only.
+function Methods:SetText(text)
+    if issecretvalue(text) then self.__secretText = true end
+    self.__text = text
+end
+function Methods:GetText()
+    if self.__secretText then return SIM.Secret(SIM.Reveal(self.__text)) end
+    return self.__text
+end
 function Methods:SetFormattedText(fmt, ...)
+    local plain = {}
     for i = 1, select("#", ...) do
         local a = select(i, ...)
         if type(a) == "table" and not issecretvalue(a) then error("a table passed to SetFormattedText") end
+        if issecretvalue(a) then self.__secretText = true end
+        plain[i] = SIM.Reveal(a)
     end
     self.__fmt, self.__args = fmt, {...}
+    local ok, text = pcall(string.format, fmt, table.unpack(plain, 1, select("#", ...)))
+    self.__text = ok and text or fmt
 end
 -- a nameplate's place (outdoors: readable; SIM.securePositions makes them secret, as in dungeons)
 function Methods:GetCenter()

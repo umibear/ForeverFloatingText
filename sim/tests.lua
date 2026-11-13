@@ -315,7 +315,9 @@ local function BlizzardCombatText(level)
 end
 local function LowTexts()
     local n = {}
-    for _, s in ipairs(G.procs) do -- (1.31.0) at the procs spot, kept while it lasts
+    -- (1.31.12) a brief alert, as Blizzard's; never at the procs spot (1.31.0-1.31.11 kept it there)
+    for _, s in ipairs(G.procs) do Ok(s.text ~= "Mana Low" and s.text ~= "Health Low", "not kept at the procs spot") end
+    for _, s in ipairs(Shown("alerts")) do
         if s.text == "Mana Low" or s.text == "Health Low" then n[#n + 1] = s.text end
     end
     return n
@@ -342,7 +344,7 @@ Test("low mana / health: Blizzard's frame runs unseen, its warning shows at the 
 end)
 
 -- (1.31.6) The author, 2026-11-12: "now that i died, i see mana low health low texts"
-Test("low mana / health: put away when you die, not shown while dead, shown again once alive if still low", function()
+Test("low mana / health: not shown while dead, shown again once alive if still low", function()
     CombatText = nil -- the last test's frame: the addon would hook it at login instead of this one
     NewGame()
     local level, dead = {health = 1, mana = 1}, false
@@ -732,6 +734,57 @@ Test("its own cooldown ending, its own global cooldown, or still on cooldown: no
     Eq(StormstrikeAlerts(), 0, "nothing")
 end)
 
+-- (1.31.11) 8 s since 2026-11-13 (08:08 log: casts 7.95-8.03 s apart; resets at 7.05 and 7.33 s got
+-- no alert with the fixed 6.0)
+local function SSRun(at, ownFrom, endAt, gcdFrom)
+    At(at, function() Cast(17364); G.SetCooldown(true, true) end) -- its own GCD first
+    At(ownFrom, function() G.SetCooldown(true, false); SIM.Fire("SPELL_UPDATE_COOLDOWN") end)
+    if gcdFrom then At(gcdFrom, function() G.SetCooldown(true, true); SIM.Fire("SPELL_UPDATE_COOLDOWN") end) end
+    At(endAt, function() G.SetCooldown(false); SIM.Fire("SPELL_UPDATE_COOLDOWN") end)
+end
+
+Test("Stormstrike's cooldown learned from two clean readings (8 s); then a reset 7.05 s after shows", function()
+    NewGame()
+    SSRun(1, 2.5, 9.0)
+    SSRun(11, 12.5, 19.02)
+    Run(21)
+    Ok(ForeverFloatingTextDB.ssCooldown and math.abs(ForeverFloatingTextDB.ssCooldown - 8.0) < 0.12,
+        "learned 8 s: " .. tostring(ForeverFloatingTextDB.ssCooldown))
+    Eq(StormstrikeAlerts(), 0, "no alert while learning")
+    At(22, function() Cast(17364); G.SetCooldown(true, true) end)
+    At(23.5, function() G.SetCooldown(true, false) end)
+    At(29.0, function() Feed("DODGE") end)
+    At(29.05, function() G.SetCooldown(false); SIM.Fire("SPELL_UPDATE_COOLDOWN") end) -- 7.05 s
+    Run(31)
+    Eq(StormstrikeAlerts(), 1, "the reset shown")
+    Ok(math.abs(ForeverFloatingTextDB.ssCooldown - 8.0) < 0.12, "a reset doesn't teach it")
+end)
+
+Test("Stormstrike's cooldown: a GCD over its end, a dodge, or one reading alone don't teach it", function()
+    NewGame()
+    SSRun(1, 2.5, 9.6, 8.1) -- a Shock's GCD from 7.1 s: "not active" only at its end
+    SSRun(11, 12.5, 19.0)
+    At(13, function() Feed("PARRY") end) -- may have reset it
+    SSRun(21, 22.5, 26.0) -- 5.0 s, no dodge: one reading
+    Run(30)
+    Eq(ForeverFloatingTextDB.ssCooldown, nil, "nothing learned")
+    -- a dodge seen only by UNIT_COMBAT, 0.7 s after the cooldown ended, still counts
+    NewGame()
+    SSRun(1, 2.5, 9.0)
+    At(9.7, function() Miss("player", "DODGE") end)
+    SSRun(11, 12.5, 19.0)
+    Run(21)
+    Eq(ForeverFloatingTextDB.ssCooldown, nil, "one clean reading only")
+end)
+
+Test("Stormstrike's cooldown made shorter by a patch is learned again", function()
+    NewGame({db = {ssCooldown = 8.0}})
+    SSRun(1, 2.5, 7.0)
+    SSRun(11, 12.5, 17.05)
+    Run(19)
+    Ok(math.abs(ForeverFloatingTextDB.ssCooldown - 6.0) < 0.12, "6 s again: " .. tostring(ForeverFloatingTextDB.ssCooldown))
+end)
+
 Test("with no cooldown info from the game, no Stormstrike alert", function()
     NewGame()
     At(1, function() Cast(17364); G.SetCooldown(nil) end)
@@ -1054,6 +1107,26 @@ Test("the quieter layout: killing blows off once, periodic gains off, your totem
     SIM.inCombat = true; SIM.Fire("PLAYER_REGEN_DISABLED")
     Run(7)
     Eq(Shown("alerts")[#Shown("alerts")].text, "+Combat", "combat state, short")
+end)
+
+-- In game (2026-11-13 03:09, 22 times since 2026-11-12): two "Windfury!" 0.23 s apart failed in
+-- SpotText, "attempt to compare a secret string value": its text came from the pool and had shown a
+-- hidden buff name, so its GetText stays hidden.
+Test("a repeat merges into a reused text that once showed a hidden value", function()
+    NewGame()
+    local first, a, b
+    At(0.5, function() SIM.RunOnUpdate(5) end) -- NewGame's "+Combat" away first
+    At(1, function() first = G.FFT:ShowAlert(nil, nil, "<%s>", {SIM.Secret("Ghost Wolf")}) end)
+    At(1.5, function() SIM.RunOnUpdate(5) end) -- the text's time is up: back to the pool
+    At(3, function() a = G.FFT:ShowAlert("Windfury!") end)
+    At(3.25, function() b = G.FFT:ShowAlert("Windfury!") end)
+    Run(4)
+    Ok(first and a == first, "the second text reuses the first one's font string")
+    local n = 0
+    for _, s in ipairs(Shown("alerts")) do if s.text == "Windfury!" then n = n + 1 end end
+    Eq(n, 1, "two in a second: one text")
+    Ok(b == a, "the repeat went into it")
+    Eq(SIM.Reveal(a:GetText()), "Windfury! x2", "merged")
 end)
 
 Test("/fft hide leaves a buff out by its name; /fft unhide brings it back", function()
@@ -1513,9 +1586,9 @@ local function Shaman(group) -- a shaman, solo unless told (the stub starts in a
     UnitClass = function() return "Shaman", "SHAMAN", 7 end
     SIM.inGroup = group or false
 end
-local function ExtraSwing(speed)
+local function ExtraSwing(speed, missed)
     SIM.Fire("COMBAT_TEXT_UPDATE", "EXTRA_ATTACKS")
-    Swing(speed)
+    Swing(speed, missed)
 end
 
 Test("Windfury Totem: the extra swing 0.10 s later takes the hit 1.46 s after the first swing; one alert", function()
@@ -1543,10 +1616,11 @@ end)
 
 Test("Windfury Totem with Flurry: the late hit 1.30 s after the first swing (12:46 log)", function()
     NewGame(); Shaman()
-    -- the weapon's Flurry delay learned first (three plain swings at 0.415)
+    -- the weapon's Flurry delay learned first (three plain swings at 0.415; 1.417 is the frame at
+    -- 0.4167: in frames of 1/60 s 1.415 falls in the one at 0.400, a delay the game didn't show)
     for i = 0, 2 do
         At(1 + 4 * i, function() Swing(3.21) end)
-        At(1.415 + 4 * i, function() Hit() end)
+        At(1.417 + 4 * i, function() Hit() end)
     end
     At(13, function() Swing(3.21) end)
     At(13.117, function() ExtraSwing(3.21) end)
@@ -1555,6 +1629,139 @@ Test("Windfury Totem with Flurry: the late hit 1.30 s after the first swing (12:
     Run(16)
     Eq(Count(Decisions("show"), "your extra swing (Windfury Totem)"), 1, "the extra swing's")
     Eq(Count(Decisions("drop"), ""), 0, "nothing dropped")
+end)
+
+-- (1.31.10) The enchant and the totem on one swing (2026-11-13 03:27 log, solo, the game's file):
+-- the extra swing hits where the first swing's would after a cast, plus its own delay, all 0.50 s
+-- later with the enchant's proc. The weapon's delays as learned there: 0.464 at 3.60 s, 0.355 at 2.77.
+local function Learned0327() return {["3.60"] = {{d = 0.464, n = 30}}, ["2.77"] = {{d = 0.355, n = 30}}} end
+local function Proc2() Line("SPELL_DAMAGE"); Line("SPELL_DAMAGE") end -- the enchant's two lines
+
+Test("Windfury Totem and the enchant on one swing: the extra swing's hit 1.95 s after it (03:27 log)", function()
+    NewGame({db = {showMisses = true, swingAnims = Learned0327()}}); Shaman()
+    At(1, function() Swing(3.60); Proc2(); ExtraSwing(3.60) end) -- 156659.256
+    At(1.228, function() Hit() end) -- the enchant's attacks
+    At(1.502, function() Hit() end)
+    At(1.960, function() Hit() end) -- the first swing's, 0.50 + 0.46 after the proc
+    At(2.953, function() Hit() end) -- the extra swing's (1.31.9 dropped it)
+    Run(5)
+    Eq(Count(Decisions("show"), "your extra attack (Windfury)"), 2, "the enchant's attacks")
+    Eq(Count(Decisions("show"), "(your swing, "), 1, "the first swing's")
+    Eq(Count(Decisions("show"), "your extra swing (Windfury Totem)"), 1, "the extra swing's")
+    Eq(Count(Decisions("drop"), ""), 0, "nothing dropped")
+    -- the extra swing parried, 1.954 (156704.613)
+    At(10, function() Swing(3.60); Proc2(); ExtraSwing(3.60, "PARRY") end)
+    At(10.229, function() Hit() end)
+    At(10.503, function() Hit() end)
+    At(10.961, function() Hit() end)
+    At(11.954, function() Miss("nameplate1", "PARRY") end)
+    Run(13)
+    Eq(Count(Decisions("show"), "your extra swing (Windfury Totem)"), 2, "the parry too")
+    UnitClass = nil
+end)
+
+Test("Windfury Totem and the enchant with Flurry: 1.61 s; Flurry from a crit in the pair's frame: 1.35 s", function()
+    NewGame({db = {swingAnims = Learned0327()}}); Shaman()
+    At(1, function() Swing(2.77); Proc2(); ExtraSwing(2.77) end) -- 156688.722
+    At(1.233, function() Hit() end)
+    At(1.501, function() Hit() end)
+    At(1.854, function() Hit() end) -- 0.50 + 0.355
+    At(2.612, function() Hit() end)
+    Run(4)
+    Eq(Count(Decisions("show"), "your extra swing (Windfury Totem)"), 1, "with Flurry")
+    -- 156685.888: first swing 3.60 s, Stormstrike in the frame, the extra swing already 2.77 s
+    At(10, function() Swing(3.60); Cast(17364); Line("SPELL_DAMAGE"); Hit(); ExtraSwing(2.77) end)
+    At(10.998, function() Hit() end) -- the first swing's, delayed by Stormstrike
+    At(11.351, function() Hit() end) -- the extra swing's: 0.464 x 2.15 + 0.355
+    Run(13)
+    Eq(Count(Decisions("show"), "your extra swing (Windfury Totem)"), 2, "Flurry on the extra swing only")
+    Eq(Count(Decisions("drop"), ""), 0, "nothing dropped")
+    UnitClass = nil
+end)
+
+Test("Windfury Totem and the enchant: a hit where the extra swing would land without the proc isn't it", function()
+    NewGame({db = {swingAnims = Learned0327()}}); Shaman(true)
+    At(1, function() Swing(3.60); Proc2(); ExtraSwing(3.60) end)
+    At(1.228, function() Hit() end)
+    At(1.502, function() Hit() end)
+    At(1.960, function() Hit() end)
+    At(2.461, function() Hit() end) -- someone else's, at the extra swing's moment without a proc
+    Run(4)
+    Eq(Count(Decisions("show"), "your extra swing"), 0, "not taken")
+    UnitClass = nil
+end)
+
+-- (1.31.11) The author's 2026-11-13 08:08 log, a 15% haste buff on: 3.13 s swings 0.403, Flurry 2.41 s 0.309
+local function Learned0808() return {["3.13"] = {{d = 0.403, n = 30}}, ["2.41"] = {{d = 0.309, n = 30}}} end
+
+Test("Windfury Totem: Flurry from a crit between the two swings, the extra on Flurry's delay", function()
+    NewGame({db = {swingAnims = Learned0808()}}); Shaman()
+    At(0.5, function() Swing(2.41) end) -- a Flurry swing a moment before: its swing time is known
+    At(0.809, function() Hit() end)
+    At(4, function() Swing(3.13); ExtraSwing(3.13) end) -- 173699.847
+    At(4.411, function() Hit(nil, nil, "CRITICAL") end) -- the first swing's crit: Flurry
+    At(5.180, function() Hit() end) -- the extra's: 0.403 x 2.15 + 0.309 = 1.175 (1.31.10 dropped it)
+    Run(7)
+    Eq(Count(Decisions("show"), "your extra swing (Windfury Totem)"), 1, "on Flurry's delay")
+    -- with no crit, a hit there isn't the extra swing's
+    NewGame({db = {swingAnims = Learned0808()}}); Shaman(true)
+    At(0.5, function() Swing(2.41) end)
+    At(0.809, function() Hit() end)
+    At(4, function() Swing(3.13); ExtraSwing(3.13) end)
+    At(4.411, function() Hit() end)
+    At(5.180, function() Hit() end) -- someone else's
+    Run(7)
+    Eq(Count(Decisions("show"), "your extra swing (Windfury Totem)"), 0, "no crit: not taken")
+    UnitClass = nil
+end)
+
+Test("Windfury Totem: the extra's Miss two frames after the first swing's hit, both shown", function()
+    NewGame({db = {showMisses = true, swingAnims = Learned0808()}}); Shaman()
+    At(1, function() Swing(3.13); Proc2(); ExtraSwing(3.13, "MISS") end) -- 173613.319
+    At(1.229, function() Hit() end)
+    At(1.503, function() Hit() end)
+    At(1.900, function() Hit(nil, nil, "CRITICAL") end)
+    At(1.917, function() Miss("nameplate1", "MISS") end) -- the next frame (0.006 s later in game)
+    Run(4)
+    Eq(Count(Decisions("show"), "with your swing's hit"), 1, "the extra's Miss")
+    Eq(Count(Decisions("drop"), ""), 0, "nothing dropped")
+    UnitClass = nil
+end)
+
+Test("a swing's number just after your killing blow is shown, solo; not in a group", function()
+    NewGame({db = {swingAnims = Learned0808()}}); Shaman()
+    At(1, function() Swing(2.41); ExtraSwing(2.41) end) -- 173597.406
+    At(1.314, function() Hit() end)
+    At(1.565, function() Cast(17364); Line("SPELL_DAMAGE"); Line("PARTY_KILL"); Hit() end) -- the kill
+    At(1.670, function() Hit() end) -- the extra's, 0.105 s after
+    Run(3)
+    Eq(Count(Decisions("show"), "after your killing blow"), 1, "shown")
+    NewGame({db = {swingAnims = Learned0808()}}); Shaman(true)
+    At(1, function() Swing(2.41); ExtraSwing(2.41) end)
+    At(1.314, function() Hit() end)
+    At(1.565, function() Cast(17364); Line("SPELL_DAMAGE"); Line("PARTY_KILL"); Hit() end)
+    At(1.670, function() Hit() end)
+    Run(3)
+    Eq(Count(Decisions("show"), "after your killing blow"), 0, "in a group: not")
+    UnitClass = nil
+end)
+
+Test("a new swing time takes the delays of the last minute's, scaled (haste, Flurry)", function()
+    NewGame({db = {swingAnims = {["3.60"] = {{d = 0.464, n = 30}}}}})
+    SIM.inGroup = false
+    At(1, function() Swing(3.60) end)
+    At(1.464, function() Hit() end)
+    At(5, function() Swing(2.41) end) -- haste and Flurry: 0.464 x 2.41 / 3.60 = 0.311
+    At(5.310, function() Hit() end) -- outside the plain window (0.39-0.55)
+    Run(7)
+    Eq(Count(Decisions("show"), "(your swing, "), 2, "both shown")
+    -- with nothing seen in the last minute, nothing to scale from
+    NewGame({db = {swingAnims = {["3.60"] = {{d = 0.464, n = 30}}}}})
+    SIM.inGroup = false
+    At(1, function() Swing(2.41) end)
+    At(1.310, function() Hit() end)
+    Run(3)
+    Eq(Count(Decisions("show"), "(your swing, "), 0, "not shown")
 end)
 
 Test("Windfury Totem: not for another class, not an off-hand swing", function()

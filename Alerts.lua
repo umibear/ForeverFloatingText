@@ -496,10 +496,35 @@ end
 -- And not shown out of combat: it would stay its whole 10 s, as leaving combat (which ends it,
 -- Procs.lua) had already happened.
 ------------------------------------------------------------------------
+-- (1.31.11) Its cooldown is learned, not fixed: since the 2026-11-13 patch it is 8 s (the author's
+-- 08:08 log, the game's file: Stormstrikes 7.95-8.03 s apart when not reset), and 1.31.10's fixed
+-- 6.0 s missed resets 7.05 and 7.33 s after the cast. The game hides its duration (logged "duration
+-- <secret>"), so the time is your own: from your cast until the game says it is no longer active,
+-- looked at every 0.1 s whether or not you press it again. A reading counts only when clean: its
+-- own cooldown (active, not "on the GCD") was still running 0.1 s before it ended, as a GCD over
+-- its end makes "not active" come up to 1.5 s late; and with no dodge, parry or block of yours from
+-- the cast until 1 s after (the feed's at once, UNIT_COMBAT's up to 0.8 s late), as those may reset
+-- it. A new length needs two clean readings within 0.15 s of each other (one could be a reset not
+-- seen); kept in ForeverFloatingTextDB.ssCooldown. 6.0 until then, the length before the patch.
 local STORMSTRIKE = "Stormstrike"
 local SS_RESET_AFTER = 1.6   -- after its own global cooldown
-local SS_RESET_BEFORE = 5.8  -- before its 6.0 s cooldown ends on its own
-local SS_GCD_SURE = 4.2      -- "on the GCD" before this: its own cooldown would outlast a 1.5 s GCD
+local SS = {avoidAt = -100, CLEAN_AFTER = 1.0, AGREE = 0.15, START = 6.0}
+function SS.Cooldown() return (FFT.db and FFT.db.ssCooldown) or SS.START end
+function SS.Before() return SS.Cooldown() - 0.2 end  -- before its cooldown ends on its own
+function SS.GcdSure() return SS.Cooldown() - 1.8 end -- "on the GCD" before this: its own would outlast a 1.5 s GCD
+function SS.Learn(took)
+    local db = FFT.db
+    if not db or took < SS_RESET_AFTER then return end
+    if math.abs(took - SS.Cooldown()) <= SS.AGREE then SS.pending = nil; return end
+    if SS.pending and math.abs(took - SS.pending) <= SS.AGREE then
+        db.ssCooldown = (took + SS.pending) / 2
+        SS.pending = nil
+        Log("Stormstrike's cooldown: %.2f s (two clean readings)", db.ssCooldown)
+    else
+        SS.pending = took
+        Log("Stormstrike's cooldown read %.2f s (kept %.2f until another agrees)", took, SS.Cooldown())
+    end
+end
 local stormstrikeID          -- learned from your own cast, else the name is used
 local lastStormstrike = -100 -- when you last cast it
 local alertedFor             -- the Stormstrike whose reset was shown
@@ -533,16 +558,16 @@ end
 
 local function CheckReset(why)
     local since = GetTime() - lastStormstrike
-    if since < SS_RESET_AFTER or since > SS_RESET_BEFORE or alertedFor == lastStormstrike then return end
+    if since < SS_RESET_AFTER or since > SS.Before() or alertedFor == lastStormstrike then return end
     local ready, text, active = StormstrikeCooldown()
-    if ready and active == true and since >= SS_GCD_SURE then
+    if ready and active == true and since >= SS.GcdSure() then
         -- only the GCD shows, but it may just outlast the cooldown's last 1.5 s: look again after it
         if recheckFor ~= lastStormstrike then
             recheckFor = lastStormstrike
             local cast = lastStormstrike
             local function Again()
                 if lastStormstrike ~= cast or alertedFor == cast then return end
-                if GetTime() - cast > SS_RESET_BEFORE then return end
+                if GetTime() - cast > SS.Before() then return end
                 CheckReset("after the GCD")
                 C_Timer.After(0.1, Again)
             end
@@ -570,12 +595,21 @@ avoided:RegisterEvent("UNIT_COMBAT")
 avoided:SetScript("OnEvent", function(_, _, unit, action)
     -- (1.28.8) only while a Stormstrike of yours is on cooldown: before, every miss, dodge or parry
     -- on any nameplate started a timer, for every class
-    if GetTime() - lastStormstrike > SS_RESET_BEFORE then return end
+    if GetTime() - lastStormstrike > SS.Before() then return end
     if ns.IsSecret(unit) or type(unit) ~= "string" or not unit:find("^nameplate") then return end
     action = Plain(action)
     if action == "DODGE" or action == "PARRY" or action == "MISS" then
         C_Timer.After(0.1, function() CheckReset("a mob's " .. action:lower()) end)
     end
+end)
+
+-- (1.31.11) your dodge, parry or block in the combat text feed (at the real moment: Incoming.lua):
+-- a Stormstrike cooldown reading near it may be a reset, not its length (SS above)
+local avoidFeed = CreateFrame("Frame")
+avoidFeed:RegisterEvent("COMBAT_TEXT_UPDATE")
+avoidFeed:SetScript("OnEvent", function(_, _, kind)
+    kind = Plain(kind)
+    if kind == "DODGE" or kind == "PARRY" or kind == "BLOCK" then SS.avoidAt = GetTime() end
 end)
 
 local probe = CreateFrame("Frame")
@@ -633,11 +667,31 @@ probe:SetScript("OnEvent", function(_, event, a1, a2, a3)
             local cast = lastStormstrike
             local function Look()
                 if lastStormstrike ~= cast or alertedFor == cast then return end
-                if GetTime() - cast > SS_RESET_BEFORE then return end
+                if GetTime() - cast > SS.Before() then return end
                 CheckReset("looked again")
                 C_Timer.After(0.1, Look)
             end
             C_Timer.After(SS_RESET_AFTER, Look)
+            -- (1.31.11) how long its cooldown lasted (SS above)
+            local before -- the last reading: "own" (its own cooldown), "gcd" (only the GCD), nil
+            local function Measure()
+                if lastStormstrike ~= cast then return end
+                local took = GetTime() - cast
+                if took > 30 then return end
+                local ready, _, active = StormstrikeCooldown()
+                if active == false then
+                    if before == "own" then
+                        C_Timer.After(SS.CLEAN_AFTER, function()
+                            if SS.avoidAt < cast then SS.Learn(took) end
+                        end)
+                    end
+                    return
+                end
+                if ready == nil and active == nil then return end -- no cooldown info
+                before = ready and "gcd" or "own"
+                C_Timer.After(0.1, Measure)
+            end
+            C_Timer.After(0.1, Measure)
         end
         return
     end
@@ -653,6 +707,7 @@ probe:SetScript("OnEvent", function(_, event, a1, a2, a3)
     elseif event == "UNIT_COMBAT" then
         local action = Plain(a2)
         if action == "DODGE" or action == "PARRY" or action == "BLOCK" then
+            SS.avoidAt = GetTime() -- (1.31.11) may have reset it: not a clean reading
             CheckReset("you " .. action:lower())
             ProbeCooldown("you " .. action:lower())
         end

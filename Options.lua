@@ -256,6 +256,9 @@ function ns.CreateOptions(FFT)
     Checkbox("showWindfury", "Show Windfury procs",
         "\"Windfury!\" when Windfury gives you extra attacks, shown with the first of them. "
         .. "A proc whose extra attacks all miss isn't shown.")
+    Checkbox("showLowWarnings", "Show low health / mana",
+        "\"Health Low\" and \"Mana Low\", in the game's own words, once as your health or mana drops under 20%. "
+        .. "The game works this out itself; the addon keeps its combat text running unseen to hear it.", ApplyBlizzard)
     Checkbox("showDispels", "Show your dispels",
         "\"Purged\", \"Cleansed\", \"Stolen\", \"Dispel failed\", and \"Broke crowd control\" when your hit breaks "
         .. "one, from your own Combat Log lines. Starts after one /reload once this version runs: the addon "
@@ -311,9 +314,6 @@ function ns.CreateOptions(FFT)
         "\"Stunned\", \"Silenced\", \"Shadow Locked\" and the like, in the game's own words, kept while it lasts. "
         .. "Off by default: the game shows it already, with its icon, in the middle of the screen. "
         .. "Where the game hides it from addons, nothing shows.")
-    Checkbox("showLowWarnings", "Show low health / mana",
-        "\"Health Low\" and \"Mana Low\", in the game's own words, kept while your health or mana is under 20%. "
-        .. "The game works this out itself; the addon keeps its combat text running unseen to hear it.", ApplyBlizzard)
     SpotText("proc", "Its own font, separate from your other numbers.", "The size of every proc.")
     SpotPosition("procs", "procsX", "procsY", "green")
     Button("Preview", "Test", function() FFT:TestProcs() end, "Shows sample procs at the position.")

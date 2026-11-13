@@ -196,14 +196,20 @@ end
 
 -- (1.31.0) A text at a fixed spot, in that spot's font. The same plain text again at the same spot
 -- within MERGE_WINDOW while the first is still up becomes "text x2", "x3". A text the game hides (fmt + args) can't be compared, so it's never merged.
+-- (1.31.9) "Still the same text" is told by its use count (FFT:Show counts each use of a font string),
+-- never by GetText: SetText / SetFormattedText with a hidden value make the font string's text a
+-- secret aspect, and GetText then returns a hidden value for good, plain texts set later too
+-- (SimpleFontStringAPIDocumentation: SecretArgumentsAddAspect, SecretReturnsForAspect Text). Texts
+-- are reused, so a "Windfury!" in one that had shown a buff's hidden name failed in game
+-- (2026-11-13 03:09: "attempt to compare a secret string value", 22 times since 2026-11-12).
 local MERGE_WINDOW = 1.0
-local merges = {} -- spot -> {text, at, fs, n, shown}
+local merges = {} -- spot -> {text, at, fs, uses, n, shown}
 function FFT:SpotText(kind, text, color, font, outline, size, fmt, args)
     local x, y = self:SpotAnchor(kind)
     local now = GetTime()
     local m = merges[kind]
     if text and not fmt and m and m.text == text and now - m.at <= MERGE_WINDOW and m.fs and m.fs:IsShown()
-        and m.fs:GetText() == m.shown then
+        and m.fs.uses == m.uses then
         m.n, m.at = m.n + 1, now
         m.shown = ("%s x%d"):format(text, m.n)
         m.fs:SetText(m.shown)
@@ -211,6 +217,6 @@ function FFT:SpotText(kind, text, color, font, outline, size, fmt, args)
     end
     local fs = self:Show(nil, text, color, false,
         {anchorX = x, anchorY = y, key = kind, font = font, outline = outline, size = size, fmt = fmt, args = args})
-    merges[kind] = (text and not fmt and fs) and {text = text, at = now, fs = fs, n = 1, shown = text} or nil
+    merges[kind] = (text and not fmt and fs) and {text = text, at = now, fs = fs, uses = fs.uses, n = 1, shown = text} or nil
     return fs
 end
