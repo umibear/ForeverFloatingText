@@ -96,6 +96,16 @@ local function Minion(unit, name)
     SIM.Fire("NAME_PLATE_UNIT_ADDED", unit)
 end
 
+-- The game knows your spells at login; here a spell was only added when its cast replayed, so
+-- CleanLearned took every learned spell for "not an attack" and removed its school and DoT rhythm
+-- before the replay began. The author's 2026-11-13 10:28 dungeon log: "Lightning Bolt" lost its
+-- school, and all 31 instant Lightning Bolts the game showed ("while your Lightning Bolt was on its
+-- way") were dropped in the replay, their lines then read as Windfury procs.
+for _, key in ipairs({"spellSchools", "dotPeriods"}) do
+    for name in pairs(ForeverFloatingTextDB[key] or {}) do
+        if type(name) == "string" then SpellId(name, nil, true, false) end
+    end
+end
 SIM.Fire("ADDON_LOADED", "ForeverFloatingText")
 FFT:WriteOwnClogFilter()
 SIM.Fire("PLAYER_LOGIN")
@@ -106,10 +116,10 @@ SIM.target = "nameplate1"
 -- 1.28.0 say which ("your cast X came with no UNIT_SPELLCAST_SENT"); for older ones, these:
 -- "Fireball" in the swing's frame didn't delay the swing (2026-11-09 09:59 log), a proc.
 local triggered = {Fireball = true}
-for i = first + 1, last do
-    local name = all[i]:match("your cast (.-) came with no UNIT_SPELLCAST_SENT")
-    if name then triggered[name] = true end
-end
+-- Each cast by its own log line, not by its name: in the 2026-11-13 10:28 log one Lightning Bolt of
+-- 39 came with no SENT (182621.496), and all 39 replayed as triggered. The "came with no" line comes
+-- just before its cast's line, with the same timestamp.
+local noSentAt = {} -- spell name -> the timestamp of its last "came with no" line
 
 -- (1.28.14) the recording's own time of each replayed hit, by its nameplate and replay time: the
 -- "DEC" lines at the end of the report say what was decided for each (to compare with the game's
@@ -162,6 +172,8 @@ for i = first + 1, last do
                     Enum.CombatLogMessageOrder.Newest)
             end)
         end
+        local noSent = rest:match("^your cast (.-) came with no UNIT_SPELLCAST_SENT")
+        if noSent then noSentAt[noSent] = ts end
         local id, castName, castAt
         local plainName, plainId = rest:match("^your cast (.-) %(id (%d+), not")
         if plainName then
@@ -178,7 +190,7 @@ for i = first + 1, last do
             if helpName then id, castName = SpellId(helpName, nil, false, true), helpName end
         end
         if id then
-            local sent = not triggered[castName]
+            local sent = not (triggered[castName] or noSentAt[castName] == ts)
             At(function()
                 if castAt then Plate(castAt); SIM.target = castAt end
                 castN = castN + 1

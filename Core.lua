@@ -281,7 +281,9 @@ end
 local log, logging = {}, false
 -- (1.30.6) 20,000 lines, from 5,000: solo a recording writes about 3 lines a second (27 minutes),
 -- in a dungeon about 12 (2026-11-10 15:25 log: 5,351 lines in 449 s), so 5,000 held 7 minutes there
-local SAVED_LINES = 20000
+-- (1.31.14) 60,000: a crowded dungeon writes 14 lines a second (the author's 2026-11-13 20:11 log:
+-- 20,273 lines in 23.7 minutes), so 20,000 lost the first 12 minutes of a 35-minute run
+local SAVED_LINES = 60000
 local function Log(fmt, ...)
     if not logging then return end
     local ok, line = pcall(string.format, "%.3f " .. fmt, GetTime(), ...)
@@ -301,7 +303,11 @@ local function Log(fmt, ...)
     end
 end
 
+-- (1.31.13) A probe, log only, counted anew in each recording (FFT.Probe below; a field, not a
+-- local: the file is at Lua's limit of 200 locals)
+FFT.probe = {lines = 0}
 local function StartSavedLog(reason)
+    FFT.probe.lines = 0
     ForeverFloatingTextLog = ForeverFloatingTextLog or {}
     ForeverFloatingTextLog.lines = ForeverFloatingTextLog.lines or {}
     ForeverFloatingTextLog.recording = true
@@ -851,6 +857,7 @@ SWING_QUICK.ANIM_SEEN = 3
 SWING_QUICK.CAST_LONG = 1.495
 SWING_QUICK.CAST_LONG_RATIO = 1.495 / 0.732
 SWING_QUICK.SLOT_LONG = 0.755
+SWING_QUICK.LINES_LATE = 0.08 -- (1.31.13) a proc's lines this long after its swing may time its hits from the swing (ExtraAttackLine)
 -- (1.29.1) Windfury's attacks don't speed up with Flurry, the swing's own hit does: with the old
 -- weapon 0.23 / 0.50 with or without Flurry, the swing 0.96 or 0.91 (NOTES.md); in the 19:58 log a
 -- Stormstrike's proc with Flurry up (34136.853) hit at 0.365 and 0.502, half of the plain 0.732 and
@@ -900,6 +907,47 @@ function SWING_QUICK.DelaysFor(key)
     end
     table.sort(out)
     return #out > 0 and out or nil
+end
+-- (1.31.13) A swing time whose learned delays all lie outside the plain window goes by them alone.
+-- The author's 2026-11-13 10:28 dungeon log (party of five, the game's combat log file beside it;
+-- weapon 3.60 s with a delay of 0.464, its Flurry swings 2.77 s with 0.355, learned solo). The
+-- 2.77 s swings kept the plain window (0.39-0.55, expected 0.46) and the cast and proc windows
+-- measured around 0.46 beside their own delay, and so:
+--   - with a cast before its hit a 2.77 s swing's number came 0.763-0.769 s after it, 12 of 12
+--     (0.355 x 2.15, the factor SWING_QUICK.ExtraFit uses; the casts 0.00-0.35 s after the swing,
+--     those at 0.40-0.78 s left it at 0.355). The late window looked at 0.862-1.060: all 12 dropped,
+--     and 8 strangers' hits shown for them (182625.646: its own at +0.763, one at +0.914 shown);
+--   - a stranger's hit at +0.46 was "as close" as its own at +0.355, and both were dropped
+--     (181899.720: +0.353 and +0.471; 181908.043: +0.357 and +0.469);
+--   - after an enchant proc the window around the lines + 0.96 stayed open beside 0.50 + 0.355
+--     (183545.919: a hit at the lines + 0.959 shown, not the author's).
+-- So for such a swing time: the plain hit only at a learned delay, a cast-delayed one at the delay +
+-- CastAdd (0.763), after a proc at 0.50 + the delay, and "expected" is a learned delay. Only once
+-- the delays are well known: 10 sightings or more, and less than 2 of any delay not yet learned
+-- (a weapon with several delays learns them one by one: in the 2026-11-10 18:53 log, replayed with
+-- no such guard, 0.366 was learned first and two swings at 0.46 were lost). A swing time with a
+-- learned delay inside the plain window is as before (3.60 s: 0.464), and so is one whose delays
+-- are only scaled from another's (DelaysFor: the +30% speed buff of 2026-11-09 kept 0.461).
+-- Replayed against the game's file: 661 -> 684 of the author's 775 hits shown, 59 -> 51 of others';
+-- the 2026-11-11 dungeon log the same decisions.
+function SWING_QUICK.Only(sw)
+    local list = sw.speed and db and db.swingAnims and db.swingAnims[sw.speed]
+    local own = list and SWING_QUICK.Anims(sw.speed)
+    if not own then return end
+    local seen, pending = 0, 0
+    for _, c in ipairs(list) do
+        if c.n >= SWING_QUICK.ANIM_SEEN then
+            if c.d >= SWING_MIN and c.d <= SWING_MAX then return end
+            seen = seen + c.n
+        else
+            pending = pending + c.n
+        end
+    end
+    if seen < 10 or pending >= 2 then return end
+    sw.only = true
+    sw.expected, sw.own = own[1], own[1]
+    sw.lateCenters = {}
+    for _, a in ipairs(own) do sw.lateCenters[#sw.lateCenters + 1] = a + SWING_QUICK.CastAdd(a) end
 end
 function SWING_QUICK.Long(anims)
     return anims and anims[#anims] >= 0.6 and anims[#anims] or nil
@@ -1010,6 +1058,7 @@ function SWING_QUICK.MarkExtra(sw, now)
             sw.min, sw.max, sw.expected, sw.own = lo - off, hi - off, expected - off, expected - off
             sw.ownAnims, sw.ownSpeed = sw.anims, sw.speed -- (1.31.10) its own delays, for SWING_QUICK.ExtraFit
             sw.speed, sw.anims, sw.centers, sw.lateCenters = nil, nil, nil, nil -- nothing to learn
+            sw.only = nil -- (1.31.13) the extra swing goes by SWING_QUICK.ExtraFit alone
             Log("  the extra swing of your swing %.3f s before (Windfury Totem)", off)
             if FFT.OnWindfury then FFT:OnWindfury() end
             return
@@ -1040,6 +1089,7 @@ function FFT:OnSwing(swingType, swingDuration)
         sw.centers = sw.anims
         local long = SWING_QUICK.Long(sw.anims)
         sw.lateCenters = long and {long * SWING_QUICK.CAST_LONG_RATIO} or nil
+        SWING_QUICK.Only(sw)
         if sw.speed then SWING_QUICK.recent[sw.speed] = sw.t end -- for Windfury's slots (BaseAnims)
     end
     while swings[1] and now - swings[1].t > 3 do table.remove(swings, 1) end
@@ -1113,7 +1163,7 @@ function FFT:OnOwnCast(spellID, castGUID)
     local at = plate and plates[plate]
     Log("your cast %s%s", name, at and at.unit and (" at " .. at.unit) or "") -- (1.28.0) the target, for replays
     FFT:NoteOwnAction()
-    ownCasts[#ownCasts + 1] = {t = now, name = name, plate = plate}
+    ownCasts[#ownCasts + 1] = {t = now, name = name, plate = plate, sent = sent}
     while ownCasts[1] and now - ownCasts[1].t > FLIGHT_WINDOW + 1 do table.remove(ownCasts, 1) end
     -- any of your spells on a mob may tick on it (Flame Shock, Rend...): a recast starts over
     if plate then
@@ -1566,7 +1616,6 @@ local function SwingFor(now, plate, meleeOnly, missed, hit)
             -- proc): the two seen came 0.808 and 0.826 s after the proc. In the 2026-11-10 15:25
             -- dungeon log a Stormstrike 0.19 s after the proc (17824.851) left the hit at 0.959, and
             -- a hunter's shot 1.41 s after the proc was shown for it.
-            local cast = CastWithSwing(sw, now, late - 0.01, late - 0.53)
             -- (1.29.0) with learned delays: 0.50 s plus one of them after the proc, or 0.755 plus
             -- the long one (SWING_QUICK.SLOT_LONG)
             local alt
@@ -1577,9 +1626,15 @@ local function SwingFor(now, plate, meleeOnly, missed, hit)
                     alt[#alt + 1] = base + (a >= 0.6 and SWING_QUICK.SLOT_LONG or 0.50) + a
                 end
             end
+            -- (1.31.13) a swing time that goes by its learned delays alone (SWING_QUICK.Only): only
+            -- those moments, and a cast from 0.50 s after the proc up to the hit they give
+            local only = sw.only and alt
+            local cast
+            if only then cast = CastWithSwing(sw, now, alt[#alt] - 0.01, alt[1] - sw.anims[1] - 0.07)
+            else cast = CastWithSwing(sw, now, late - 0.01, late - 0.53) end
             local altHit = alt and SWING_QUICK.Near(alt, d, SWING_QUICK.ANIM_TOL + slack)
-            if (d >= late - SWING_QUICK.ProcBefore(sw) - slack and d <= late + SWING_AFTER_PROC.after + slack) or altHit then
-                sw.min, sw.max, sw.expected = late - SWING_QUICK.ProcBefore(sw), late + SWING_AFTER_PROC.after, late
+            if (not only and d >= late - SWING_QUICK.ProcBefore(sw) - slack and d <= late + SWING_AFTER_PROC.after + slack) or altHit then
+                sw.min, sw.max, sw.expected = late - SWING_QUICK.ProcBefore(sw), late + SWING_AFTER_PROC.after, only and alt[1] or late
                 if alt then
                     sw.centers = alt
                     for _, c in ipairs(alt) do sw.max = math.max(sw.max, c + SWING_QUICK.ANIM_TOL) end
@@ -1587,13 +1642,14 @@ local function SwingFor(now, plate, meleeOnly, missed, hit)
                 sw.afterCast = "Windfury"
                 if cast then
                     sw.waitLate = sw.waitLate or cast
-                    sw.lateAt = late + SWING_QUICK.CastExtra(sw)
+                    sw.lateAt = only and (alt[1] + SWING_QUICK.CastAdd(sw.anims[1])) or late + SWING_QUICK.CastExtra(sw)
                 end
                 return sw, d, false
             end
-            local later = late + SWING_QUICK.CastExtra(sw)
-            if cast and (sw.waitLate or not sw.cands) and d >= later - SWING_QUICK.CastBefore(sw) - slack
-                and d <= later + SWING_AFTER_CAST.after + slack then
+            local later = only and (alt[1] + SWING_QUICK.CastAdd(sw.anims[1])) or late + SWING_QUICK.CastExtra(sw)
+            if cast and (sw.waitLate or not sw.cands)
+                and d >= later - (only and SWING_QUICK.ANIM_TOL or SWING_QUICK.CastBefore(sw)) - slack
+                and d <= later + (only and SWING_QUICK.ANIM_TOL or SWING_AFTER_CAST.after) + slack then
                 sw.min, sw.max, sw.expected = late - SWING_QUICK.ProcBefore(sw), late + SWING_AFTER_PROC.after, late
                 sw.waitLate = sw.waitLate or cast
                 sw.lateAt = later
@@ -1603,9 +1659,11 @@ local function SwingFor(now, plate, meleeOnly, missed, hit)
             -- (1.29.0) a cast up to the weapon's longest learned delay delays it too (Stormstrike
             -- +0.570 before a 0.73 s swing, 30282.250)
             local long = SWING_QUICK.Long(sw.anims)
-            local cast = not sw.ranged and CastWithSwing(sw, now, long and long - 0.01 or nil)
+            -- (1.31.13) going by its learned delays alone (SWING_QUICK.Only): a cast up to the last of
+            -- them, a hit only at one of them, a late hit only at one's cast-delayed moment
+            local cast = not sw.ranged and CastWithSwing(sw, now, long and long - 0.01 or (sw.only and sw.anims[#sw.anims]) or nil)
             local anim = sw.anims and SWING_QUICK.Near(sw.anims, d, SWING_QUICK.ANIM_TOL + slack)
-            if (d >= sw.min - slack and d <= sw.max + slack) or anim then
+            if (not sw.only and d >= sw.min - slack and d <= sw.max + slack) or anim then
                 if cast then sw.waitLate = sw.waitLate or cast end
                 return sw, d, false
             end
@@ -1614,7 +1672,7 @@ local function SwingFor(now, plate, meleeOnly, missed, hit)
             local late = sw.own + SWING_QUICK.CastExtra(sw)
             local lateLong = cast and sw.lateCenters
                 and SWING_QUICK.Near(sw.lateCenters, d, SWING_QUICK.ANIM_TOL + slack)
-            if cast and (sw.waitLate or not sw.cands) and (lateLong or d >= late - SWING_QUICK.CastBefore(sw) - slack
+            if cast and (sw.waitLate or not sw.cands) and (lateLong or not sw.only and d >= late - SWING_QUICK.CastBefore(sw) - slack
                 and d <= late + SWING_AFTER_CAST.after + slack) then
                 sw.waitLate = sw.waitLate or cast
                 return sw, d, true
@@ -2328,6 +2386,36 @@ end
 local ORDER_OLDEST = (Enum and Enum.CombatLogMessageOrder and Enum.CombatLogMessageOrder.Oldest) or 1
 local lastReplay = 0
 
+-- (1.31.13) A probe for what isn't known yet, log only and only while /fft debug records: what is
+-- a Combat Log line's text to an addon? COMBAT_LOG_MESSAGE's message is "a preformatted combat log
+-- message protected by a |K string wrapper" (CombatLogSecureDocumentation.lua). Its type, whether
+-- it is a secret value, its length and start when it isn't, and whether a font string takes it (one
+-- made for this, never shown): the first 5 lines of a recording and (1.31.14) the first 2 of every
+-- fight after, as the first answer scrolled out of the saved log (2026-11-13 20:11).
+-- (1.31.14) The other probe is answered and gone: groupmates' casts do reach an addon in a dungeon
+-- (UNIT_SPELLCAST_SUCCEEDED for party1-4), but only spells with a cast time, and with the spell
+-- hidden. In the 20:11 log 125 came in 23.7 minutes: a priest's heals, a hunter's Aimed Shot, a
+-- rogue's dynamite and poisons; no instant of the rogue's or the warrior's, so nothing that tells a
+-- groupmate's melee hit from yours.
+FFT.Probe = {}
+function FFT.Probe.Line(text)
+    local probe = FFT.probe
+    if not logging or probe.lines >= 5 then return end
+    probe.lines = probe.lines + 1
+    local secret = IsSecret(text)
+    local what = ""
+    if not secret and type(text) == "string" then
+        what = (", length %d, starts %q"):format(#text, text:sub(1, 60))
+    end
+    if not probe.fs then
+        probe.fs = holder:CreateFontString(nil, "OVERLAY")
+        probe.fs:SetFont(STANDARD_TEXT_FONT, 12, "")
+        probe.fs:Hide()
+    end
+    local drawn = pcall(probe.fs.SetText, probe.fs, text)
+    Log("probe: line text is a %s, secret %s%s; SetText %s", type(text), tostring(secret), what, drawn and "took it" or "refused it")
+end
+
 function FFT:OnClogMessage(r, g, b, order)
     if not clog.mode then return end
     if IsSecret(order) then
@@ -2485,9 +2573,17 @@ local function InTheAir(school, now)
 end
 
 -- A hit of yours was matched: what it was the hit of is no longer on its way
+-- (1.31.13) In the cast's own moment only a hit that can be the cast's: not one of another school
+-- than the spell was learned to hit as. The author's 2026-11-13 10:28 dungeon log, 183317.268: an
+-- instant Lightning Bolt cast in the frame of a Flame Shock tick; the tick's hit marked the bolt
+-- landed, so the bolt's own Nature hit (183317.464, its line 0.047 s before) found nothing in the
+-- air and was dropped.
 local function MarkLanded(school, now)
     for _, c in ipairs(ownCasts) do
-        if not c.landed and math.abs(now - c.t) <= SAME_MOMENT then c.landed = true; return end
+        if not c.landed and math.abs(now - c.t) <= SAME_MOMENT then
+            local known = SpellSchool(c.name)
+            if not (school and known and known ~= school) then c.landed = true; return end
+        end
     end
     if not school then return end
     for _, c in ipairs(ownCasts) do
@@ -2723,12 +2819,56 @@ function SWING_QUICK.AfterKill(p)
     end
 end
 
+-- (1.31.15) Windfury's hit that comes with its line: Windfury Totem's own, mostly. Beside its extra swing (SWING_QUICK.MarkExtra) the totem,
+-- from rank 2, also strikes as a spell: SPELL_DAMAGE "Windfury Totem" (10608, physical) with no
+-- SPELL_EXTRA_ATTACKS, 0.02-0.05 s after the swing's row or a Stormstrike's in the game's file.
+-- The author's 2026-11-13 20:11 dungeon log (rank 2, the game's file beside it): 27 of them; to the
+-- addon a "damage" line and a physical hit at the swing's mob in one frame, 0.017-0.050 s after
+-- PLAYER_SWING (217719.310, 217840.394) or after a Stormstrike whose own hit came in its cast's
+-- frame (217761.552). Shown as any hit with its line, and from now told as "Windfury!".
+-- The weapon enchant's attack looks the same when it kills: its number then comes with its line
+-- instead of 0.22 s later (the 2026-11-11 18:49 dungeon log, no totem there: swing 39620.065, kill
+-- and damage lines and a physical crit at 39620.108, SPELL_DAMAGE "Windfury Weapon" in the game's
+-- file). A Windfury proc either way, and one that had no alert before, its slot staying empty.
+-- Not a tick's line (a physical DoT of yours ticks at any moment). Not a miss: Windfury's attacks
+-- that miss tell nothing either, and a miss line there can be another
+-- proc's (the same log: a triggered spell's SPELL_MISSED 0.02-0.03 s after its swing). Not while a
+-- cast of yours that you sent could still be this hit's own (an instant whose hit comes a frame
+-- late). Shamans only, as the extra swing: other classes' on-hit effects aren't measured.
+SWING_QUICK.TOTEM_HIT = {from = 0.010, to = 0.070}
+function SWING_QUICK.TotemHit(p, m)
+    local hit, W = p.hit, SWING_QUICK.TOTEM_HIT
+    if hit.miss or hit.school ~= 1 or m.kind ~= "damage" or m.periodic or math.abs(m.t - p.now) > SAME_FRAME then return false end
+    local after = false
+    for _, c in ipairs(ownCasts) do
+        local dt = p.now - c.t
+        if not c.landed and c.sent ~= false and math.abs(dt) <= SAME_MOMENT then
+            local known = SpellSchool(c.name)
+            if not (known and known ~= 1) then return false end -- this hit can be that cast's own
+        end
+        if c.landed and c.plate == p.plate and dt >= W.from and dt <= W.to then
+            local known = SpellSchool(c.name) -- (a physical spell's school may not be learned: Stormstrike's isn't)
+            if not known or known == 1 then after = true end
+        end
+    end
+    for i = #swings, 1, -1 do
+        local sw = swings[i]
+        local dt = p.now - sw.t
+        if dt > W.to then break end
+        if dt >= W.from and sw.plate == p.plate and sw.hand == 0 and not sw.ranged and not sw.form then after = true end
+    end
+    if not after then return false end
+    local ok, _, class = pcall(UnitClass, "player")
+    return ok and Plain(class) == "SHAMAN"
+end
+
 local function ClogDecide(p)
     local lonely = p.alone and LinesInMoment(p.now, p.hit) == 1
     local m, air = ClogFind(p.now, p.hit)
     if m then
         m.used = true
         local school = (not p.hit.miss) and p.hit.school or nil
+        local totem = false
         -- one hit and one line alone in their moment: that color stood for this school
         if lonely and not air and school and m.key then
             lineSchools[m.key] = lineSchools[m.key] or {}
@@ -2746,11 +2886,16 @@ local function ClogDecide(p)
                 if math.abs(p.now - c.t) <= SAME_MOMENT then ownNow = true end
             end
             if not ownNow and school then VoteMinion(p.plate, p.hit, p.now) end
+            totem = SWING_QUICK.TotemHit(p, m) -- before MarkLanded: a cast still on its way counts
             MarkLanded(school, p.now)
             LearnFromLine(p.plate, p.hit, p.now, m) -- (1.21.0) facts for the fallback
         end
         ShowClogHit(p, ("your Combat Log line, %+.3fs%s"):format(m.t - p.now,
             air and (", while your " .. (air.name or "spell") .. " was on its way") or ""))
+        if totem then
+            Log("  Windfury's hit with its line, just after your swing or cast (the totem's own, or an attack that killed)")
+            if FFT.OnWindfury then FFT:OnWindfury() end
+        end
         return
     end
     -- (1.17.0) a line from long before: a shot's from its frame, or a melee line
@@ -2841,7 +2986,7 @@ local function ResolveSwing(sw)
     local anyLate = false
     for _, cand in ipairs(sw.cands) do if cand.late then anyLate = true end end
     if anyLate then
-        expected = sw.lateAt or (sw.own + SWING_QUICK.CastExtra(sw))
+        expected = sw.lateAt or (sw.only and sw.lateCenters and sw.lateCenters[1]) or (sw.own + SWING_QUICK.CastExtra(sw))
         sw.afterCast = sw.waitLate and sw.waitLate.name or sw.afterCast
     end
     local group = {}
@@ -3144,6 +3289,14 @@ local function ExtraAttackLine(plate, hit, now)
     -- 2026-11-10 15:25 dungeon log (five players, 31 procs) unchanged. Simulator, 300 s, seeds 1-3:
     -- with 1 other +6 of yours and none of theirs, with 4 others +2 and +2; a raid as before.
     local bySwing = not IsInRaid()
+    -- (1.31.13) And only when the lines came 0.08 s or more after the swing or the cast, as in the
+    -- logs above (0.099-0.134 s). In a dungeon they come 0.03 s after it: the author's 2026-11-13
+    -- 10:28 log, 45 of 54 procs 0.025-0.045 s after, 9 in its frame, and every attack timed from the
+    -- lines (0.211-0.233 and 0.472-0.497 s, 80 of 80 by the game's file). There a slot from the swing
+    -- only moved the first slot's start to 0.17 s after the lines: 8 hits taken, 7 of them
+    -- strangers' (182177.122: a rogue's two instants 0.19 s after the lines, both attacks then
+    -- dropped), and in the 2026-11-11 dungeon log 40901.612 / .632. Replayed against the game's
+    -- files: +3 of the author's and -3 of others' in the first, -2 of others' in the second.
     -- a line of the proc at t, if one is left (its lines, less those a Windfury hit took).
     -- swingAt: the swing's moment when the lines came after its frame, else nil
     local function LineIn(t, swingAt, anims)
@@ -3163,12 +3316,15 @@ local function ExtraAttackLine(plate, hit, now)
     end
     for _, sw in ipairs(swings) do
         if sw.plate == plate and SwingProc(sw, now) then
-            local m, from = LineIn(sw.procAt, bySwing and sw.procAt - sw.t > SAME_FRAME and sw.t or nil, SWING_QUICK.BaseAnims())
+            local m, from = LineIn(sw.procAt, bySwing and sw.procAt - sw.t >= SWING_QUICK.LINES_LATE and sw.t or nil, SWING_QUICK.BaseAnims())
             if m then return m, sw, from end
         end
     end
     for _, c in ipairs(ownCasts) do
-        if c.plate == plate and now - c.t <= 0.6 + PROC_AFTER_CAST then
+        -- (1.31.13) not after a spell learned to hit as another school (a melee attack sets Windfury
+        -- off): that bolt's line, left unused 0.149 s after its cast, was read as a late proc line,
+        -- and a stranger's physical hit 0.52 s later shown with "Windfury!" (183317.941)
+        if c.plate == plate and now - c.t <= 0.6 + PROC_AFTER_CAST and (SpellSchool(c.name) or 1) == 1 then
             local m = LineIn(c.t, nil, SWING_QUICK.BaseAnims())
             if m then return m, c end
             -- (1.28.11) its lines after the cast's frame (see PROC_AFTER_CAST)
@@ -3178,7 +3334,7 @@ local function ExtraAttackLine(plate, hit, now)
                 if x.kind == "damage" and not x.used and after > SAME_FRAME and after <= PROC_AFTER_CAST
                     and x.t ~= tried then
                     tried = x.t
-                    local late, from = LineIn(x.t, bySwing and c.t or nil, SWING_QUICK.BaseAnims())
+                    local late, from = LineIn(x.t, bySwing and after >= SWING_QUICK.LINES_LATE and c.t or nil, SWING_QUICK.BaseAnims())
                     if late then return late, c, from end
                 end
             end
@@ -4158,10 +4314,12 @@ events:SetScript("OnEvent", function(_, event, ...)
             -- why not, when not (the 20:05 log only said "not in use", with no line of yours at all)
             Log("fight starts; Combat Log: %s%s", FFT:ClogStatus(),
                 FFT:ClogActive() and "" or ("; " .. FFT:ClogStateText()))
+            FFT.probe.lines = math.min(FFT.probe.lines, 3) -- (1.31.14) two more lines' text, each fight
         end
     elseif event == "COMBAT_LOG_MESSAGE" then
         if db and db.enabled then
-            local _, r, g, b, order = ...
+            local text, r, g, b, order = ...
+            FFT.Probe.Line(text)
             FFT:OnClogMessage(r, g, b, order)
         end
     elseif event == "PLAYER_LOGOUT" then

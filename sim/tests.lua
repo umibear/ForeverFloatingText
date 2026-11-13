@@ -2513,6 +2513,195 @@ Test("without Stormstrike its resets aren't watched; learning it, or casting it,
 end)
 
 ------------------------------------------------------------------------
+-- (1.31.13) The 2026-11-13 10:28 dungeon log (party of five, the game's file beside it)
+------------------------------------------------------------------------
+-- 182625.646: a 2.77 s (Flurry) swing, Stormstrike in its frame, its hit at +0.763 dropped and a
+-- stranger's at +0.914 shown as "later as your Stormstrike"; 12 of 12 such swings dropped
+Test("a swing time learned at 0.355 s: a cast moves its hit to 0.763 s, and a hit at 0.91 isn't it", function()
+    NewGame({db = {swingAnims = {["2.77"] = {{d = 0.355, n = 30}}}}})
+    At(1, function() Swing(2.77); Cast(17364); Line("SPELL_DAMAGE"); Hit() end)
+    At(1.763, function() Hit() end) -- yours
+    At(1.914, function() Hit() end) -- someone else's
+    Run(4)
+    Eq(Count(Decisions("show"), "your Combat Log line"), 1, "Stormstrike's own hit")
+    Eq(Count(Decisions("show"), "your swing, 0.7"), 1, "the swing's hit at 0.763")
+    Eq(#Decisions("show"), 2, "nothing else")
+    Eq(Count(Decisions("drop"), "no Combat Log line"), 1, "the stranger's dropped")
+end)
+
+-- 181899.720: its own hit at +0.353 and a stranger's at +0.471 were "as close", both dropped
+Test("a swing time learned at 0.355 s: a stranger's hit at 0.46 is no tie, and alone it isn't the swing's", function()
+    NewGame({db = {swingAnims = {["2.77"] = {{d = 0.355, n = 30}}}}})
+    At(1, function() Swing(2.77) end)
+    At(1.355, function() Hit() end) -- yours
+    At(1.471, function() Hit() end) -- someone else's
+    At(5, function() Swing(2.77) end)
+    At(5.46, function() Hit() end)  -- someone else's; yours never came (the mob died)
+    Run(8)
+    Eq(Count(Decisions("show"), "your swing, 0.3"), 1, "the hit at 0.355")
+    Eq(#Decisions("show"), 1, "nothing else")
+    Eq(Count(Decisions("drop"), "no Combat Log line"), 2, "both strangers' dropped")
+    local ties = 0
+    for _, l in ipairs(ForeverFloatingTextLog.lines) do if l:find("another hit as close", 1, true) then ties = ties + 1 end end
+    Eq(ties, 0, "no tie")
+end)
+
+-- 183545.919: a hit 0.959 s after the proc's lines shown for a 2.77 s swing (its own comes at 0.50 + 0.355)
+Test("a swing time learned at 0.355 s: after a Windfury proc its hit comes 0.855 s after the lines, not 0.96", function()
+    NewGame({db = {swingAnims = {["2.77"] = {{d = 0.355, n = 30}}}}})
+    At(1, function() Swing(2.77); Line("SPELL_DAMAGE"); Line("SPELL_DAMAGE") end)
+    At(1.228, function() Hit() end)
+    At(1.504, function() Hit() end)
+    At(1.855, function() Hit() end) -- yours
+    At(1.96, function() Hit() end)  -- someone else's
+    Run(4)
+    Eq(Count(Decisions("show"), "your extra attack (Windfury)"), 2, "the two attacks")
+    Eq(Count(Decisions("show"), "your swing, 0.8"), 1, "the swing's hit at 0.855")
+    Eq(#Decisions("show"), 3, "nothing else")
+end)
+
+-- the 2026-11-10 18:53 log replayed with no such guard: 0.366 learned first, two swings at 0.46 lost
+Test("going by learned delays alone waits until they are well known; one inside the plain window changes nothing", function()
+    NewGame({db = {swingAnims = {["3.10"] = {{d = 0.366, n = 3}}, ["3.60"] = {{d = 0.464, n = 30}},
+        ["2.90"] = {{d = 0.372, n = 30}, {d = 0.47, n = 2}}}}})
+    At(1, function() Swing(3.10) end)  -- learned from 3 swings only
+    At(1.464, function() Hit() end)
+    At(5, function() Swing(2.90) end)  -- another delay seen twice: still being learned
+    At(5.464, function() Hit() end)
+    At(9, function() Swing(3.60); Cast(17364); Line("SPELL_DAMAGE"); Hit() end)
+    At(9.994, function() Hit() end)
+    Run(12)
+    Eq(Count(Decisions("show"), "your swing, 0.4"), 2, "both swings in the plain window")
+    Eq(Count(Decisions("show"), "later as your Stormstrike"), 1, "3.60 s: the cast-delayed hit as before")
+    Eq(#Decisions("drop"), 0, "nothing dropped")
+end)
+
+-- 182177.122: lines 0.035 s after the swing, a rogue's two instants 0.19 s after the lines taken as
+-- the attacks ("0.23s after your swing"), both real attacks (0.22 and 0.49 s after the lines) dropped
+Test("Windfury lines 0.03 s after the swing (a dungeon): a hit 0.18 s after the lines isn't an attack", function()
+    NewGame()
+    At(1, function() Swing(3.60) end)
+    At(1.04, function() Line("SPELL_DAMAGE"); Line("SPELL_DAMAGE") end) -- the frame at 1.033
+    At(1.22, function() Hit() end)  -- someone else's: 0.183 s after the lines, 0.217 after the swing
+    At(1.25, function() Hit() end)  -- 0.217 s after the lines
+    At(1.52, function() Hit() end)  -- 0.483
+    At(1.985, function() Hit() end) -- the swing's own, 0.95 s after the lines
+    Run(4)
+    Eq(Count(Decisions("show"), "your extra attack (Windfury)"), 2, "the two attacks")
+    Eq(Count(Decisions("show"), "after your swing"), 0, "none timed from the swing")
+    Eq(Count(Decisions("show"), "later as your Windfury"), 1, "the swing")
+    Eq(Count(Decisions("drop"), "no Combat Log line"), 1, "the stranger's dropped")
+    Eq(WindfuryAlerts(), 1, "one alert")
+end)
+
+-- 183317.268: an instant Lightning Bolt cast in the frame of a Flame Shock tick; the bolt's Nature hit
+-- (its line 0.047 s before) dropped, its line read as a Windfury proc, a stranger's hit shown with "Windfury!"
+Test("a tick in a spell's cast frame doesn't land the spell: its own hit is yours, its line no Windfury proc", function()
+    NewGame()
+    SIM.spells[403] = {name = "Lightning Bolt", harmful = true}
+    ForeverFloatingTextDB.spellSchools = {["Lightning Bolt"] = 8}
+    At(1, function() Cast(403); Line("SPELL_PERIODIC_DAMAGE"); Hit(nil, 4) end) -- the cast, and a tick's line and hit
+    At(1.15, function() Line("SPELL_DAMAGE") end) -- the bolt's line
+    At(1.2, function() Hit(nil, 8) end)           -- and its hit, 0.05 s later
+    At(1.667, function() Hit() end)               -- someone's physical hit 0.52 s after that line
+    Run(4)
+    Eq(Count(Decisions("show"), "your Combat Log line, +0.000s"), 1, "the tick")
+    Eq(Count(Decisions("show"), "while your Lightning Bolt was on its way"), 1, "the bolt")
+    Eq(Count(Decisions("show"), "Windfury"), 0, "no Windfury attack")
+    Eq(WindfuryAlerts(), 0, "no alert")
+    Eq(Count(Decisions("drop"), "no Combat Log line"), 1, "the stranger's dropped")
+end)
+
+-- 2026-11-13 20:11 log, the game's file beside it: SPELL_DAMAGE "Windfury Totem" (rank 2) 0.02-0.05 s
+-- after a swing's row or a Stormstrike's; a "damage" line and a physical hit in one frame (217719.310
+-- after a swing, 217937.978 after a Stormstrike). 27 of them, none told as Windfury by 1.31.14.
+Test("Windfury Totem's own hit, with its line just after your swing or Stormstrike, says \"Windfury!\"", function()
+    NewGame()
+    UnitClass = function() return "Shaman", "SHAMAN", 7 end
+    At(1, function() Swing(3.60) end)
+    At(1.031, function() Line("SPELL_DAMAGE"); Hit() end) -- the totem's hit
+    At(1.464, function() Hit() end)                        -- the swing's own
+    At(5, function() Cast(17364); Line("SPELL_DAMAGE"); Hit() end) -- Stormstrike, its hit in its frame
+    At(5.037, function() Line("SPELL_DAMAGE"); Hit() end)          -- the totem's hit
+    Run(8)
+    Eq(Count(Decisions("show"), "your Combat Log line, +0.000s"), 3, "both totem hits and Stormstrike's")
+    Eq(Count(Decisions("show"), "your swing, 0.4"), 1, "the swing's own number as before")
+    Eq(#Decisions("drop"), 0, "nothing dropped")
+    Eq(WindfuryAlerts(), 2, "an alert for each totem hit")
+end)
+
+-- 2026-11-11 18:49 log: swing 39620.065, kill and damage lines and a physical crit at 39620.108,
+-- SPELL_DAMAGE "Windfury Weapon" in the game's file (no totem in that run); no alert by 1.31.14
+Test("a Windfury attack that kills comes with its line: \"Windfury!\" once, with nothing left to wait for", function()
+    NewGame()
+    UnitClass = function() return "Shaman", "SHAMAN", 7 end
+    At(1, function() Swing(3.60) end)
+    At(1.043, function() Line("PARTY_KILL"); Line("SPELL_DAMAGE"); Hit(nil, 1, "CRITICAL") end)
+    Run(4)
+    Eq(Count(Decisions("show"), "your Combat Log line, +0.000s"), 1, "the attack")
+    Eq(WindfuryAlerts(), 1, "one alert")
+end)
+
+Test("no \"Windfury!\" for a spell's own hit a frame after its cast, a miss, a tick, another school or class", function()
+    NewGame()
+    UnitClass = function() return "Shaman", "SHAMAN", 7 end
+    At(1, function() Cast(17364) end)                                     -- Stormstrike, its hit a frame late
+    At(1.03, function() Line("SPELL_DAMAGE"); Hit() end)
+    At(5, function() Swing(3.60) end)
+    At(5.02, function() Line("SPELL_MISSED", "DODGE"); Miss("nameplate1", "DODGE") end) -- a miss (the totem's or a proc's)
+    At(5.464, function() Hit() end)
+    At(9, function() Swing(3.60) end)
+    At(9.03, function() Line("SPELL_PERIODIC_DAMAGE"); Hit() end)         -- a physical tick
+    At(9.464, function() Hit() end)
+    At(13, function() Swing(3.60) end)
+    At(13.03, function() Line("SPELL_DAMAGE"); Hit(nil, 4) end)           -- a fire hit (a totem's pulse)
+    At(13.464, function() Hit() end)
+    At(17, function() Swing(3.60) end)
+    At(17.2, function() Line("SPELL_DAMAGE"); Hit() end)                  -- 0.2 s after the swing: not just after it
+    At(17.464, function() Hit() end)
+    Run(20)
+    Eq(WindfuryAlerts(), 0, "no alert on a shaman")
+    Eq(#Decisions("drop"), 0, "and every hit shown as before")
+    NewGame()
+    UnitClass = function() return "Warrior", "WARRIOR", 1 end
+    At(1, function() Swing(3.60) end)
+    At(1.031, function() Line("SPELL_DAMAGE"); Hit() end)
+    At(1.464, function() Hit() end)
+    Run(4)
+    Eq(WindfuryAlerts(), 0, "no alert on another class")
+    Eq(#Decisions("show"), 2, "its hits shown all the same")
+end)
+
+Test("the probe logs what a line's text is, at a recording's start and each fight's, and shows nothing", function()
+    NewGame()
+    local shownBefore = #Shown()
+    local function Probes(what)
+        local n = 0
+        for _, l in ipairs(ForeverFloatingTextLog.lines) do if l:find("probe: " .. what, 1, true) then n = n + 1 end end
+        return n
+    end
+    At(1, function()
+        SIM.Fire("UNIT_SPELLCAST_SUCCEEDED", "party1", "Cast-x-1", 8042) -- (1.31.14) no longer logged
+        for _ = 1, 7 do Line("SPELL_DAMAGE") end
+    end)
+    Run(2)
+    Eq(Probes("cast of "), 0, "no cast probe")
+    Eq(Probes("line text is a"), 5, "the first five lines' text")
+    Eq(#Shown(), shownBefore, "nothing shown")
+    At(3, function()
+        SIM.Fire("PLAYER_REGEN_DISABLED") -- shows its own "entering combat" notice
+        for _ = 1, 4 do Line("SPELL_DAMAGE") end
+    end)
+    Run(4)
+    Eq(Probes("line text is a"), 7, "two more at a fight's start")
+    SlashCmdList.FOREVERFLOATINGTEXT("debug") -- recording off
+    local before = #ForeverFloatingTextLog.lines
+    At(5, function() Line("SPELL_DAMAGE") end)
+    Run(6)
+    Eq(#ForeverFloatingTextLog.lines, before, "nothing logged when not recording")
+end)
+
+------------------------------------------------------------------------
 -- Run them
 ------------------------------------------------------------------------
 -- `lua5.3 sim/tests.lua <text>`: only the tests whose name holds the text, with the addon's log
