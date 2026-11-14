@@ -16,7 +16,7 @@ local print = print -- the fake game's print (wowstub.lua) keeps the addon's cha
 
 local function Fight(others, seed)
     ForeverFloatingTextDB, ForeverFloatingTextLog = nil, nil -- nothing carries over from the last fight
-    for _, name in ipairs({"Core.lua", "Spots.lua", "Heals.lua", "Incoming.lua", "Alerts.lua", "Procs.lua"}) do
+    for _, name in ipairs({"Core.lua", "Filter.lua", "GameSettings.lua", "Spots.lua", "Heals.lua", "Incoming.lua", "Alerts.lua", "Procs.lua"}) do
         _G["SRC_" .. name:gsub("%W", "_")] = READ(name)
     end
     SRC_wowstub_lua = READ("sim/wowstub.lua")

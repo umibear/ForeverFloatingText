@@ -190,6 +190,7 @@ function FFT:ProcShow(key, color, text, fmt, args, seconds)
         local t = table.remove(pool) or Frame():CreateFontString(nil, "OVERLAY")
         r = {key = key, text = t}
     end
+    if #rows == 0 and FFT.ProcSeeForm then FFT.ProcSeeForm() end -- (1.31.17) your form from here on (see `watch`)
     table.insert(rows, 1, r)
     local t = r.text
     local font, size = db.procFont or FFT.DEFAULTS.procFont, db.procSize or FFT.DEFAULTS.procSize
@@ -256,6 +257,7 @@ local function SeeForm()
     if t - form.t > SAME_FRAME then form.before = form.now end
     form.now, form.t = f, t
 end
+FFT.ProcSeeForm = SeeForm -- for FFT:ProcShow, defined above it
 local function CastBars()
     local db = FFT.db
     if not db then return {} end
@@ -309,15 +311,9 @@ watch:SetScript("OnEvent", function(_, event, _, a2, a3)
     if event == "UNIT_SPELLCAST_START" then
         local name = Plain(a3) and Plain(C_Spell.GetSpellName(Plain(a3)))
         if type(name) == "string" then CastBars()[name] = true end
+        -- (1.31.24) this cast has a cast bar (its castGUID, UNIT_SPELLCAST_START's second value)
+        form.barGuid, form.barName, form.barAt = Plain(a2), name, GetTime()
         return
-    end
-    if event == "UNIT_AURA" or event == "UNIT_SPELLCAST_SUCCEEDED" then
-        SeeForm()
-        -- a form may be set after its aura: looked at again next frame, once per frame
-        if event == "UNIT_AURA" and not form.again then
-            form.again = true
-            C_Timer.After(0, function() form.again = false; SeeForm() end)
-        end
     end
     if event == "PLAYER_REGEN_ENABLED" then
         -- stacks stay after a fight: learned there (0.5 s after, as Alerts.lua reads your buffs: right
@@ -331,13 +327,41 @@ watch:SetScript("OnEvent", function(_, event, _, a2, a3)
         FFT:ProcEnd("stormstrike", "you left combat") -- it stays ready, but it's no proc any more
         return
     end
+    -- (1.31.17) Nothing up: nothing to end, and your form needn't be followed (FFT:ProcShow reads it
+    -- as a row comes up). Before, every buff update of yours, ticks and refreshes too, read the form
+    -- and started a timer, with no proc on screen.
     if #rows == 0 then return end
+    if event == "UNIT_AURA" or event == "UNIT_SPELLCAST_SUCCEEDED" then
+        SeeForm()
+        -- a form may be set after its aura: looked at again next frame, once per frame
+        if event == "UNIT_AURA" and not form.again then
+            form.again = true
+            C_Timer.After(0, function() form.again = false; SeeForm() end)
+        end
+    end
     if event == "UNIT_SPELLCAST_SUCCEEDED" then
         local id = Plain(a3)
         if not id then return end
         local name = Plain(C_Spell.GetSpellName(id))
         if name == "Stormstrike" then FFT:ProcEnd("stormstrike", "you cast it") return end -- English: Alerts.lua
         if not (Plain(C_Spell.IsSpellHarmful(id)) or Plain(C_Spell.IsSpellHelpful(id))) then return end
+        -- (1.31.24) A cast that had its cast bar wasn't made instant by the proc: it didn't use it.
+        -- The author's 2026-11-14 11:55 log with the game's file, 16400.804 and 16887.625: Healing
+        -- Wave after a 3.0 s cast bar; the game removed "Maelstrom Ready!" at its end (one aura
+        -- ended in its frame) but Maelstrom Weapon stayed at 5 stacks, and the next Lightning Bolt,
+        -- 25 s later, was still instant and took them (16425.601). The text had ended at the heal:
+        -- 5 stacks, the bolt ready, nothing on screen. Told by the cast's own GUID, the same at its
+        -- start and its end; when the game hides it, by the spell's name within 10 s of its start.
+        local guid = Plain(a2)
+        local hadBar = form.barAt ~= nil and ((guid ~= nil and form.barGuid == guid)
+            or (guid == nil and form.barGuid == nil and form.barName == name and GetTime() - form.barAt <= 10))
+        if hadBar then
+            if Find("game") then
+                Log("proc game stays: your %s had a cast bar (%.2f s), so it didn't use the proc", tostring(name), GetTime() - form.barAt)
+            end
+            form.barAt = nil
+            return
+        end
         lastUse = {t = GetTime(), name = type(name) == "string" and name or "cast"}
         Used()
         return

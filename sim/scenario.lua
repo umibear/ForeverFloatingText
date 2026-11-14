@@ -53,6 +53,8 @@ end
 local ns = {}
 local ADDON_FILES = {
     {"Core.lua", Patch(SRC_Core_lua, CONFIG.patches)},
+    {"Filter.lua", SRC_Filter_lua},
+    {"GameSettings.lua", SRC_GameSettings_lua},
     {"Spots.lua", SRC_Spots_lua},
     {"Heals.lua", SRC_Heals_lua},
     {"Incoming.lua", SRC_Incoming_lua},

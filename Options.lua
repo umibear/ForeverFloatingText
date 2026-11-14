@@ -189,9 +189,9 @@ function ns.CreateOptions(FFT)
     SubPage("Incoming")
     Header("Incoming")
     Checkbox("showIncoming", "Show incoming damage",
-        "Damage you take, at its own position. The game's own combat text over your character is turned off "
-        .. "meanwhile: the game has no separate switch for its incoming damage, so its low health and low mana "
-        .. "warnings go with it. If another addon shows incoming damage, turn it off there.", ApplyBlizzard)
+        "Damage you take, at its own position. The game's own combat text over your character is hidden "
+        .. "meanwhile; its low health and low mana warnings are shown by the addon instead (Alerts page). "
+        .. "If another addon shows incoming damage, turn it off there.", ApplyBlizzard)
     Checkbox("showIncomingMisses", "Show avoided attacks",
         "Attacks on you that miss, or that you dodge, parry, block, resist, absorb or are immune to.")
     Checkbox("showIncomingHeals", "Show incoming healing",
@@ -295,8 +295,8 @@ function ns.CreateOptions(FFT)
     Header("Procs")
     Checkbox("showStormstrikeReset", "Show Stormstrike reset",
         "\"Stormstrike!\" when Stormstrike's cooldown is reset (a shaman talent: when you dodge or parry), "
-        .. "so you know you can use it again. Shown when the game reports it ready before its 6 second "
-        .. "cooldown is over, and kept until you cast Stormstrike or leave combat (10 seconds at most).")
+        .. "so you know you can use it again. Shown when the game reports it ready before its cooldown "
+        .. "is over, and kept until you cast Stormstrike or leave combat (10 seconds at most).")
     Checkbox("showGameProcs", "Show the game's proc notices",
         "Notices the game gives for a proc, such as \"Maelstrom Ready!\" at five stacks of Maelstrom Weapon. "
         .. "Kept until a spell of yours uses it up (30 seconds at most). The game keeps the name hidden from "
@@ -395,15 +395,36 @@ function ns.CreateOptions(FFT)
         "Restores the game's own floating combat text settings to their defaults. The ones this addon "
         .. "replaces stay hidden while their feature is on. /fft cvars lists them.")
 
+    -- About (1.31.21): which version this is and whose, from the .toc (Core.lua FFT.Meta), where new
+    -- versions are, and how to report a problem. The version is the first thing a report needs.
+    SubPage("About")
+    local version, author = FFT.Meta("Version") or "?", FFT.Meta("Author") or "?"
+    local website = FFT.Meta("X-Website")
+    Header(("Version %s, by %s"):format(version, author))
+    if website then
+        Button("Website", "Copy address", function()
+            ns.ShowCopyWindow(website, "Forever Floating Text website (Ctrl+C)")
+        end, website .. "\n\nNew versions and what changed in each. The game can't open a web page: this shows "
+            .. "the address in a small window to copy from.")
+    end
+    Button("Report a problem", "How to", function()
+        ns.Print(("to report a problem (version %s): type /fft debug, play until it happens, type /reload, "
+            .. "then send the file WTF\\Account\\<your account>\\SavedVariables\\ForeverFloatingText.lua. "
+            .. "It has your character's name in a few lines."):format(version))
+    end, "Prints in chat how to record a debug log and which file to send. The recording says which version made it.")
+    Button("Status", "Show", function() FFT:Status() end,
+        "Prints in chat the version and how your hits are being told apart right now. Same as /fft status.")
+
     Settings.RegisterAddOnCategory(main)
     ns.OpenOptions = function() Settings.OpenToCategory(main:GetID()) end
 end
 
 ------------------------------------------------------------------------
--- Copy window for the debug log (chat can't be copied from)
+-- Copy window for the debug log (chat can't be copied from); (1.31.21) and for the website's
+-- address on the About page (title: what the window says it holds)
 ------------------------------------------------------------------------
 local copyFrame
-function ns.ShowCopyWindow(text)
+function ns.ShowCopyWindow(text, title)
     if not copyFrame then
         copyFrame = CreateFrame("Frame", "ForeverFloatingTextCopy", UIParent, "BasicFrameTemplateWithInset")
         copyFrame:SetSize(600, 400)
@@ -414,7 +435,6 @@ function ns.ShowCopyWindow(text)
         copyFrame:RegisterForDrag("LeftButton")
         copyFrame:SetScript("OnDragStart", copyFrame.StartMoving)
         copyFrame:SetScript("OnDragStop", copyFrame.StopMovingOrSizing)
-        if copyFrame.TitleText then copyFrame.TitleText:SetText("Forever Floating Text debug (Ctrl+A, Ctrl+C)") end
 
         local scroll = CreateFrame("ScrollFrame", nil, copyFrame, "UIPanelScrollFrameTemplate")
         scroll:SetPoint("TOPLEFT", 12, -30)
@@ -428,6 +448,7 @@ function ns.ShowCopyWindow(text)
         scroll:SetScrollChild(edit)
         copyFrame.edit = edit
     end
+    if copyFrame.TitleText then copyFrame.TitleText:SetText(title or "Forever Floating Text debug (Ctrl+A, Ctrl+C)") end
     copyFrame.edit:SetText(text)
     copyFrame:Show()
     copyFrame.edit:SetFocus()

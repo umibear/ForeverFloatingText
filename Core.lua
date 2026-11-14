@@ -18,7 +18,9 @@
 local ADDON, ns = ...
 local FFT = {}
 ns.FFT = FFT
-FFT.critAt = {} -- (1.31.11) plate -> when a crit of yours there was last shown
+-- (1.31.11) plate -> when a crit of yours there was last shown. (1.31.18) Weak keys: a target with
+-- no nameplate has a key of its own, a new one at each target change (FFT.TargetPseudo)
+FFT.critAt = setmetatable({}, {__mode = "k"})
 
 FFT.DEFAULTS = {
     enabled = true,
@@ -246,6 +248,17 @@ local function Print(msg)
 end
 FFT.Print = Print
 
+-- (1.31.21) A field of the addon's .toc ("Version", "Author", "X-Website"), or nil:
+-- C_AddOns.GetAddOnMetadata(name, variable) (AddOnsDocumentation.lua). For the About page of the
+-- options, /fft status and the first line of a debug recording, so that a report says which
+-- version made it (the kept logs carried it only in their file names, typed by hand).
+function FFT.Meta(field)
+    if not (C_AddOns and C_AddOns.GetAddOnMetadata) then return nil end
+    local ok, value = pcall(C_AddOns.GetAddOnMetadata, ADDON, field)
+    value = ok and Plain(value) or nil
+    return type(value) == "string" and value ~= "" and value or nil
+end
+
 local function PlateOf(unit)
     return C_NamePlate.GetNamePlateForUnit(unit)
 end
@@ -314,8 +327,9 @@ local function StartSavedLog(reason)
     local lines = ForeverFloatingTextLog.lines
     local ok, totemPlates = pcall(C_CVar.GetCVar, "nameplateShowFriendlyPlayerTotems")
     -- (1.30.7) raid or not too: some rules are for a party but not a raid (ExtraAttackLine)
-    lines[#lines + 1] = ("=== %s %s, in group: %s, raid: %s, totem nameplates: %s ==="):format(reason,
-        date("%Y-%m-%d %H:%M:%S"), tostring(IsInGroup()), tostring(IsInRaid()), ok and tostring(totemPlates) or "?")
+    lines[#lines + 1] = ("=== %s %s, in group: %s, raid: %s, totem nameplates: %s, version %s ==="):format(reason,
+        date("%Y-%m-%d %H:%M:%S"), tostring(IsInGroup()), tostring(IsInRaid()), ok and tostring(totemPlates) or "?",
+        FFT.Meta("Version") or "?") -- (1.31.21)
 end
 local function S(v) -- printable form of a maybe-secret value
     if IsSecret(v) then return "<secret>" end
@@ -640,6 +654,16 @@ local function HitOpts(hit, opts)
     return opts
 end
 
+-- (1.31.19) A physical hit's color once it is known what it was. BuildHit picks it as the hit
+-- comes, before anyone knows whose it is: the auto-attack color unless a cast of yours finished in
+-- the last 0.05 s. So Windfury's attacks (spell damage, not swings) drew as auto attacks, and a
+-- swing's hit landing just after any cast of yours as an ability. The author's choice,
+-- 2026-11-14: Windfury attacks in the physical color. swing: true for a swing's own hit.
+function FFT.Recolor(hit, swing)
+    if hit.miss or hit.school ~= 1 then return end
+    hit.color = (swing and db.schoolColors) and Color("colorAuto") or SchoolColor(1)
+end
+
 -- (1.30.0) Where a damage number goes: over its nameplate, or at the damage spot (Spots.lua) when
 -- that's chosen (db.damageWhere) or it has no plate (your target's key, FFT.TargetPseudo). Returns
 -- the plate for FFT:Show (nil at the spot) and the options.
@@ -873,13 +897,19 @@ function SWING_QUICK.BaseAnims()
     end
     return best
 end
--- learned delays for this swing time (sorted), or nil
+-- learned delays for this swing time (sorted), or nil. Callers only read the list.
+-- (1.31.17) Kept until a delay is learned or the saved list is another (SWING_QUICK.AddAnim wipes
+-- `sorted`): it was built and sorted anew for each swing and each Windfury look.
+SWING_QUICK.sorted = {} -- swing time -> {list = the saved list it was made from, out = the delays or false}
 function SWING_QUICK.Anims(key)
     local list = key and db and db.swingAnims and db.swingAnims[key]
     if not list then return nil end
+    local kept = SWING_QUICK.sorted[key]
+    if kept and kept.list == list then return kept.out or nil end
     local out = {}
     for _, c in ipairs(list) do if c.n >= SWING_QUICK.ANIM_SEEN then out[#out + 1] = c.d end end
     table.sort(out)
+    SWING_QUICK.sorted[key] = {list = list, out = #out > 0 and out}
     return #out > 0 and out or nil
 end
 -- (1.31.11) The delays for a swing time not learned yet, from those learned at another swing time
@@ -960,11 +990,66 @@ function SWING_QUICK.Near(anims, d, tol)
     end
     return best
 end
+-- (1.31.16) The learned delays are a weapon's (its attack animations set them), but they were kept
+-- by swing time alone, for every weapon and character of the account: the author's saved "3.13"
+-- held two weapons' swings (one's own swing time, another's 3.60 s under a 15% haste buff), and a
+-- weapon replaced days before still had its three delays there, for any later weapon to inherit at
+-- that swing time. Now ForeverFloatingTextDB.swingAnims holds the delays of the main-hand weapon
+-- in use (swingWeapon: its item ID); another weapon's are put away by item ID (swingAnimsBy, the 8
+-- last used) and come back with it. The first weapon seen takes what was learned before.
+-- GetInventoryItemID("player", 16): Blizzard's own UI reads the main hand this way
+-- (EquipmentManager.lua); it isn't in the generated API docs, so whether it can be hidden isn't
+-- known: nothing readable, nothing changes, and each fight's start logs what it gave.
+-- A swing time not swung at for 30 days is forgotten (CleanLearned), so what an older weapon left
+-- under the first one goes too.
+SWING_QUICK.KEEP_WEAPONS, SWING_QUICK.KEEP_SECONDS = 8, 30 * 86400
+function SWING_QUICK.MainHand()
+    if not GetInventoryItemID then return nil end
+    local ok, id = pcall(GetInventoryItemID, "player", 16)
+    id = ok and Plain(id) or nil
+    return type(id) == "number" and id or nil
+end
+function SWING_QUICK.Weapon()
+    local id = db and SWING_QUICK.MainHand()
+    if not id or id == db.swingWeapon then return end
+    if db.swingWeapon == nil then
+        Log("main-hand weapon: item %d; the swing delays learned so far count as its own", id)
+    else
+        local by = db.swingAnimsBy or {}
+        db.swingAnimsBy = by
+        if db.swingAnims and next(db.swingAnims) then
+            by[db.swingWeapon] = {anims = db.swingAnims, seen = time and time() or 0}
+        end
+        db.swingAnims = by[id] and by[id].anims or nil
+        by[id] = nil
+        local n, oldest, oldestAt = 0, nil, nil
+        for item, kept in pairs(by) do
+            n = n + 1
+            if not oldestAt or (kept.seen or 0) < oldestAt then oldest, oldestAt = item, kept.seen or 0 end
+        end
+        if n > SWING_QUICK.KEEP_WEAPONS then by[oldest] = nil end
+        SWING_QUICK.delays, SWING_QUICK.recent = {}, {} -- what this session saw was the other weapon's
+        Log("main-hand weapon: item %d (was %d), %s", id, db.swingWeapon,
+            db.swingAnims and "its learned swing delays are back" or "no swing delays learned for it yet")
+    end
+    db.swingWeapon = id
+end
+function SWING_QUICK.Forget(now) -- swing times not swung at for KEEP_SECONDS
+    for key, list in pairs(db.swingAnims or {}) do
+        if type(list) == "table" then
+            if type(list.seen) ~= "number" then list.seen = now
+            elseif now - list.seen > SWING_QUICK.KEEP_SECONDS then db.swingAnims[key] = nil end
+        end
+    end
+end
+
 function SWING_QUICK.AddAnim(key, d, why)
     if not key or not db or IsInGroup() then return end
     db.swingAnims = db.swingAnims or {}
     local list = db.swingAnims[key] or {}
     db.swingAnims[key] = list
+    list.seen = time and time() or 0
+    SWING_QUICK.sorted[key] = nil -- its sorted delays are made again (SWING_QUICK.Anims)
     local best
     for _, c in ipairs(list) do
         if math.abs(c.d - d) <= 0.02 and (not best or math.abs(c.d - d) < math.abs(best.d - d)) then best = c end
@@ -1013,6 +1098,43 @@ end
 function FFT.IsTarget(unit)
     local ok, same = pcall(UnitIsUnit, unit, "target")
     return ok and Plain(same) == true
+end
+
+-- (1.31.22) A killing swing's number does come: through your target, once the dead mob's nameplate
+-- is gone (the author's 2026-11-14 11:20 log, solo, the game's file beside it: `target WOUND` 0.461
+-- and 0.463 s after killing swings at 14356.922 and 14444.076, and a Windfury attack's and its
+-- swing's 0.50 and 1.00 s after the one at 14656.580; 5 such numbers in 12 minutes, all dropped).
+-- FFT.Rekey at the plate's removal was meant to carry the swing over to the target's own key and
+-- didn't (why isn't known: the removal is logged from now on). So each swing and cast remembers
+-- whom it was at (the target's GUID where readable, else the count of target changes), and a hit
+-- reported for your target with no nameplate first takes over what you did at that same target
+-- under its plate (FFT.Adopt). Another target never does: its GUID, or the count, differs.
+FFT.targetEpoch = 0
+function FFT.TargetMark()
+    local ok, guid = pcall(UnitGUID, "target")
+    guid = ok and Plain(guid) or nil
+    return type(guid) == "string" and guid or nil, FFT.targetEpoch
+end
+function FFT.Adopt(key)
+    local guid, epoch = FFT.TargetMark()
+    local function Same(x)
+        if x.plate == key or x.plate == nil then return false end
+        if guid and x.guid then return x.guid == guid end
+        return x.epoch == epoch
+    end
+    for _, sw in ipairs(swings) do
+        if Same(sw) then
+            if dots[sw.plate] and not dots[key] then dots[key], dots[sw.plate] = dots[sw.plate], nil end
+            Log("  your swing %.3f s ago was at this target under its nameplate: it goes on under your target", GetTime() - sw.t)
+            sw.plate = key
+        end
+    end
+    for _, c in ipairs(ownCasts) do
+        if Same(c) then
+            if dots[c.plate] and not dots[key] then dots[key], dots[c.plate] = dots[c.plate], nil end
+            c.plate = key
+        end
+    end
 end
 
 -- (1.30.5) Windfury Totem's extra swing. Since the 2026-11-11 patch the totem works beside the weapon
@@ -1080,8 +1202,12 @@ function FFT:OnSwing(swingType, swingDuration)
         own = timing.expected, -- its own delay, for SWING_AFTER_CAST
         hand = Plain(swingType)}
     local sw = swings[#swings]
+    sw.guid, sw.epoch = FFT.TargetMark() -- (1.31.22) whom it was at (FFT.Adopt)
     if not form and not sw.ranged then
+        SWING_QUICK.Weapon() -- (1.31.16) the learned delays are the weapon's in your main hand
         sw.speed = SWING_QUICK.Key(swingDuration)
+        local learned = sw.speed and db.swingAnims and db.swingAnims[sw.speed]
+        if learned then learned.seen = time and time() or 0 end -- still swung at (SWING_QUICK.Forget)
         sw.quick = SWING_QUICK.Is(sw.speed)
         if sw.quick then sw.expected, sw.own = SWING_QUICK.own, SWING_QUICK.own end
         -- (1.29.0) the delays this weapon's swings were seen to hit after (SWING_QUICK.Anims)
@@ -1164,6 +1290,7 @@ function FFT:OnOwnCast(spellID, castGUID)
     Log("your cast %s%s", name, at and at.unit and (" at " .. at.unit) or "") -- (1.28.0) the target, for replays
     FFT:NoteOwnAction()
     ownCasts[#ownCasts + 1] = {t = now, name = name, plate = plate, sent = sent}
+    ownCasts[#ownCasts].guid, ownCasts[#ownCasts].epoch = FFT.TargetMark() -- (1.31.22) whom it was at (FFT.Adopt)
     while ownCasts[1] and now - ownCasts[1].t > FLIGHT_WINDOW + 1 do table.remove(ownCasts, 1) end
     -- any of your spells on a mob may tick on it (Flame Shock, Rend...): a recast starts over
     if plate then
@@ -1329,6 +1456,7 @@ function FFT:CleanLearned()
         end
         db.learnVersion = 2
     end
+    SWING_QUICK.Forget(time and time() or 0) -- (1.31.16) swing delays of swing times long unused
     -- 1.14.0 kept minion schools by spell name ("Attack"); from 1.14.1 they're by spell ID
     if db.minionSchools then
         for key in pairs(db.minionSchools) do
@@ -1367,6 +1495,24 @@ end
 
 local function SpellSchool(name)
     return db.spellSchools and db.spellSchools[name]
+end
+
+-- (1.31.16) One vote of a cast for the school its spell hits as, counted with the votes above: 3
+-- for one school, at least 75% of all, and it is learned. Given by the Combat Log's lines
+-- (FFT.SchoolFromLine, FFT.UnlearnedFlight below). A field, not a local: Lua's 200 locals a file.
+function FFT.VoteSchool(c, school, why)
+    if c.voted or SpellSchool(c.name) then return end
+    c.voted = true
+    local v = flightVotes[c.name] or {n = 0}
+    flightVotes[c.name] = v
+    v[school] = (v[school] or 0) + 1
+    v.n = v.n + 1
+    Log("  %s: vote for school %d (%d of %d; %s)", c.name, school, v[school], v.n, why)
+    if v[school] >= 3 and v[school] >= 0.75 * v.n then
+        db.spellSchools = db.spellSchools or {}
+        db.spellSchools[c.name] = school
+        Log("  learned: %s hits as school %d (from %d casts, by your Combat Log lines)", c.name, school, v.n)
+    end
 end
 
 -- A cast in this same moment, if any
@@ -2164,7 +2310,8 @@ function FFT:ClogCheckFilter()
                     r, g, b = math.min(r * 1.5, 1), math.min(g * 1.5, 1), math.min(b * 1.5, 1)
                 end
                 byEvent[#byEvent + 1] = {r = r, g = g, b = b, kind = EventKind(event),
-                    periodic = event:find("PERIODIC") ~= nil} -- (1.21.0) a DoT's tick
+                    periodic = event:find("PERIODIC") ~= nil, -- (1.21.0) a DoT's tick
+                    shield = event:find("^DAMAGE_SHIELD") ~= nil} -- (1.31.23) Thorns and the like
             end
         end
         clog.byEvent = byEvent
@@ -2194,128 +2341,19 @@ function FFT:ClogKeepOn()
     end
 end
 
-------------------------------------------------------------------------
--- Our own Combat Log filter (1.15.1)
-------------------------------------------------------------------------
--- A new player's Combat Log uses Blizzard's "My actions" filter: it also shows what's done to
--- you, and its event list leaves out spell misses and damage shields (Lightning Shield, Thorns)
--- (Blizzard_CombatLog_Filter_Defaults in Blizzard_CombatLog.lua). So the addon adds a filter of
--- its own, "Forever Floating Text": only your and your pet's/guardians' actions, misses and damage
--- shields included, each kind of event in its own color, and selects it.
--- When: only at PLAYER_LOGOUT (also fires on /reload). The filters are Blizzard_CombatLog's saved
--- variable; only Blizzard's code may apply them (C_CombatLog.ApplyFilterSettings has
--- restrictions), and it reads them fresh from disk at the next login. Filter settings changed by an addon and
--- applied during play break Blizzard's secure Combat Log processor.
-local OWN_FILTER_NAME = "Forever Floating Text"
--- (1.27.0) the addon's name before; its filter is taken over and renamed at the next logout, so
--- the Combat Log keeps working from the first login without a second filter left behind
-local OLD_FILTER_NAMES = {OwnCombatText = true}
-local OWN_COLORS = {          -- each kind its own color; swings and others never share a damage color
-    direct = {1.00, 0.80, 0.30}, tick = {0.80, 0.60, 1.00}, ranged = {0.85, 0.70, 0.50},
-    miss = {0.60, 0.65, 0.80}, shield = {1.00, 0.60, 0.25},
-    melee = {0.90, 0.90, 0.90}, meleeMiss = {0.60, 0.60, 0.60},
-    heal = {0.35, 1.00, 0.45}, hot = {0.55, 0.88, 0.55}, interrupt = {1.00, 0.45, 0.10}, kill = {1.00, 1.00, 1.00},
-    cast = {0.45, 0.80, 1.00}, -- (1.17.0) apart from all the others and Blizzard's 0.5 grey default
-    -- (1.31.0) your dispels and the crowd control your hit broke, apart from all of the above
-    purge = {0.30, 0.85, 1.00}, cleanse = {0.40, 0.95, 0.80}, steal = {0.60, 0.80, 1.00},
-    dispelFailed = {0.55, 0.72, 0.82}, broke = {1.00, 0.35, 0.35},
-}
--- 1.17.0: SPELL_CAST_SUCCESS, so every cast of yours has a line. A harmful spell that does no
--- damage (Sunder Armor, Hunter's Mark, Purge) brought none, and 4 such casts in a row made
--- ClogActive think the lines had stopped. Its lines never stand for a hit (kind "cast").
--- SPELL_LEECH / SPELL_PERIODIC_LEECH: Drain Life-type damage.
-local OWN_EVENTS = {
-    SPELL_CAST_SUCCESS = "cast", SPELL_LEECH = "direct", SPELL_PERIODIC_LEECH = "tick",
-    SPELL_DAMAGE = "direct", SPELL_BUILDING_DAMAGE = "direct", SPELL_PERIODIC_DAMAGE = "tick",
-    RANGE_DAMAGE = "ranged", DAMAGE_SHIELD = "shield", SWING_DAMAGE = "melee",
-    SPELL_MISSED = "miss", SPELL_PERIODIC_MISSED = "miss", RANGE_MISSED = "miss",
-    DAMAGE_SHIELD_MISSED = "miss", SWING_MISSED = "meleeMiss",
-    SPELL_HEAL = "heal", SPELL_PERIODIC_HEAL = "hot", SPELL_INTERRUPT = "interrupt", PARTY_KILL = "kill",
-    SPELL_DISPEL = "purge", SPELL_STOLEN = "steal", SPELL_DISPEL_FAILED = "dispelFailed", -- (1.31.0)
-    SPELL_AURA_BROKEN = "broke", SPELL_AURA_BROKEN_SPELL = "broke",
-}
--- (1.31.0) these lines are colored by the event with the aura's type added (the game's strings:
--- ACTION_SPELL_DISPEL_BUFF "dispelled", _DEBUFF "cleansed", ACTION_SPELL_STOLEN_BUFF, ...):
--- a buff dispelled is a Purge, a debuff a cleanse
-FFT.OWN_AURA_EVENTS = { -- a table of FFT: Core.lua is at Lua's 200 locals
-    SPELL_DISPEL_BUFF = "purge", SPELL_DISPEL_DEBUFF = "cleanse", SPELL_STOLEN_BUFF = "steal", SPELL_STOLEN_DEBUFF = "steal",
-    SPELL_AURA_BROKEN_BUFF = "broke", SPELL_AURA_BROKEN_DEBUFF = "broke",
-    SPELL_AURA_BROKEN_SPELL_BUFF = "broke", SPELL_AURA_BROKEN_SPELL_DEBUFF = "broke",
-}
+-- (1.31.18) The addon's own Combat Log filter (written at logout, FFT:WriteOwnClogFilter) is in
+-- Filter.lua, and Blizzard's combat text settings (FFT:ApplyBlizzardText) in GameSettings.lua: this
+-- file was at Lua's limit of 200 local variables.
 FFT.DISPEL_KINDS = {purge = true, cleanse = true, steal = true, dispelFailed = true, broke = true}
--- A miss's line is colored by the event name with its miss type added (always for SPELL_MISSED,
--- for the others with "full text" on: CombatLogProcessor:GenerateMessage), so color those too
-local MISS_TYPES = {"ABSORB", "BLOCK", "DEFLECT", "DODGE", "EVADE", "IMMUNE", "MISS", "PARRY", "REFLECT", "RESIST"}
-
-local function DeepCopy(v)
-    if type(v) ~= "table" then return v end
-    local out = {}
-    for k, x in pairs(v) do out[k] = DeepCopy(x) end
-    return out
-end
-
-local function OwnFilterIndex(saved)
-    for i, f in ipairs(saved.filters) do
-        if type(f) == "table" and f.name == OWN_FILTER_NAME then return i end
-    end
-    for i, f in ipairs(saved.filters) do
-        if type(f) == "table" and OLD_FILTER_NAMES[f.name] then return i end
-    end
-end
-
--- Is the Combat Log using our filter now? (nil when it can't be told)
-function FFT:OwnFilterInUse()
-    local saved = _G.Blizzard_CombatLog_Filters
-    if type(saved) ~= "table" or type(saved.filters) ~= "table" then return nil end
-    local i = OwnFilterIndex(saved)
-    return i ~= nil and saved.currentFilter == i
-end
-
--- At PLAYER_LOGOUT only (see above)
-function FFT:WriteOwnClogFilter()
-    local saved = _G.Blizzard_CombatLog_Filters
-    local mine, pet = _G.COMBATLOG_FILTER_MINE, _G.COMBATLOG_FILTER_MY_PET
-    if type(saved) ~= "table" or type(saved.filters) ~= "table" or not mine or not pet then return end
-    local index = OwnFilterIndex(saved)
-    if not (db.enabled and db.useCombatLog and db.ownClogFilter) then
-        -- turned off: give the Combat Log back the filter it had before ours
-        if index and saved.currentFilter == index then
-            local prev = db.clogPrevFilter
-            saved.currentFilter = (type(prev) == "number" and prev ~= index and saved.filters[prev]) and prev or 1
-        end
-        return
-    end
-    if saved.currentFilter ~= index then db.clogPrevFilter = saved.currentFilter end
-    index = index or (#saved.filters + 1)
-    local filter = DeepCopy(_G.DEFAULT_COMBATLOG_FILTER_TEMPLATE or {})
-    filter.name, filter.quickButtonName, filter.tooltip = OWN_FILTER_NAME, OWN_FILTER_NAME, OWN_FILTER_NAME
-    filter.hasQuickButton = true
-    filter.quickButtonDisplay = {solo = true, party = true, raid = true}
-    filter.settings = type(filter.settings) == "table" and filter.settings or {}
-    filter.settings.lineColoring = true
-    filter.settings.lineColorPriority = 3 -- lines colored by event
-    filter.settings.lineHighlighting = false
-    filter.colors = type(filter.colors) == "table" and filter.colors or {}
-    local coloring, events = {}, {}
-    for event, kind in pairs(OWN_EVENTS) do
-        local c = OWN_COLORS[kind]
-        coloring[event] = {r = c[1], g = c[2], b = c[3], a = 1}
-        events[event] = true
-        if event:find("_MISSED$") then
-            for _, missType in ipairs(MISS_TYPES) do
-                coloring[event .. "_" .. missType] = {r = c[1], g = c[2], b = c[3], a = 1}
-            end
-        end
-    end
-    for event, kind in pairs(FFT.OWN_AURA_EVENTS) do -- (1.31.0) coloring only: not events of their own
-        local c = OWN_COLORS[kind]
-        coloring[event] = {r = c[1], g = c[2], b = c[3], a = 1}
-    end
-    filter.colors.eventColoring = coloring
-    filter.colors.highlightedEvents = {}
-    filter.filters = {{sourceFlags = {[mine] = true, [pet] = true}, eventList = events}}
-    saved.filters[index] = filter
-    saved.currentFilter = index
+-- The game loads a file new to the .toc only when it starts, not on /reload: updated while the
+-- game runs, this file would call what isn't there yet. So each of those two files' functions
+-- called from outside it starts as one that does nothing, and login says to restart the game.
+function FFT.NotLoaded() end
+for _, name in ipairs({"OwnFilterInUse", "OwnFilterReady", "SetupReminder", "WriteOwnClogFilter", -- Filter.lua
+    "ApplyBlizzardText", "ApplyBlizzardCombatTextFrame", "CombatTextState", "RestoreBlizzardTextForLogout",
+    "LogCombatTextCVars", "ResetBlizzardCVars", "TotemPlatesReminder", "EnemyPlatesNotice", "ListCVars",
+    "FeedWanted"}) do -- GameSettings.lua
+    FFT[name] = FFT.NotLoaded
 end
 
 function FFT:ClogActive()
@@ -2365,17 +2403,19 @@ end
 
 -- A Combat Log message: keep it if it's one of yours
 -- Second value (1.21.0): true when every event of that color is periodic (a DoT's tick)
+-- Third value (1.31.23): true when every event of that color is a damage shield's
 local function ClogKind(r, g, b)
-    if not clog.byEvent then return "any", false end
-    local kind, periodic
+    if not clog.byEvent then return "any", false, false end
+    local kind, periodic, shield
     for _, e in ipairs(clog.byEvent) do
         if SameColor(e, r, g, b) then
-            if kind and kind ~= e.kind then return "any", false end
+            if kind and kind ~= e.kind then return "any", false, false end
             kind = e.kind
             periodic = (periodic == nil or periodic) and e.periodic
+            shield = (shield == nil or shield) and e.shield
         end
     end
-    return kind or "any", periodic == true
+    return kind or "any", periodic == true, shield == true
 end
 
 -- 1.17.0: Blizzard replays old lines into its Combat Log window (Blizzard_CombatLog loading at login
@@ -2435,16 +2475,18 @@ function FFT:OnClogMessage(r, g, b, order)
     end
     local now = GetTime()
     clog.ownSinceMsg = 0
-    local kind, periodic = ClogKind(r, g, b)
+    local kind, periodic, shield = ClogKind(r, g, b)
     local proc = kind == "cast" and FFT.procCastAt and math.abs(now - FFT.procCastAt) <= SAME_FRAME or nil
     if proc then FFT.procCastAt = nil end -- (1.31.0) one line for one notice (FFT.NoteProcCast)
     clogMsgs[#clogMsgs + 1] = {t = now, kind = kind, periodic = periodic, key = ("%.2f %.2f %.2f"):format(r, g, b),
-        proc = proc}
+        proc = proc, shield = shield}
     while clogMsgs[1] and now - clogMsgs[1].t > 2 do table.remove(clogMsgs, 1) end
     Log("your Combat Log line: %s (%.2f %.2f %.2f, order %s)", kind, r, g, b, S(order))
     -- (1.22.1) only when the color says PARTY_KILL for sure (filter colored by event): replayed
     -- lines were skipped above, and "any" (colors can't tell) never counts
+    if kind == "miss" then FFT.MissLine(now) end -- (1.31.16) an instant spell that missed has landed
     if kind == "kill" and self.OnKillingBlow then self:OnKillingBlow() end
+    if kind == "kill" then SWING_QUICK.KillProc(now) end -- (1.31.20) Windfury on a swing that kills
     if FFT.DISPEL_KINDS[kind] and self.OnDispelLine then self:OnDispelLine(kind) end -- (1.31.0) Notices.lua
 end
 
@@ -2555,7 +2597,7 @@ local function MinionCastLine(now)
     end
 end
 
-local function InTheAir(school, now)
+local function InTheAir(school, now, plate)
     if not school or school == 1 then return nil end
     for _, c in ipairs(minionCasts) do
         local dt = now - c.t
@@ -2566,9 +2608,13 @@ local function InTheAir(school, now)
         local line = MinionCastLine(now)
         if line then return line end
     end
+    -- (1.31.16) at the mob it was cast at (plate given): with every spell's school learned now, a
+    -- spell that missed stays "on its way" its whole 2.5 s, and a stranger's hit of its school on
+    -- another mob could take an unused line of yours meanwhile
     for _, c in ipairs(ownCasts) do
         local dt = now - c.t
-        if not c.landed and dt > SAME_MOMENT and dt <= FLIGHT_WINDOW and SpellSchool(c.name) == school then return c end
+        if not c.landed and dt > SAME_MOMENT and dt <= FLIGHT_WINDOW and SpellSchool(c.name) == school
+            and (plate == nil or c.plate == nil or c.plate == plate) then return c end
     end
 end
 
@@ -2609,18 +2655,20 @@ end
 -- most of them taking a Windfury proc's lines, which wait 0.23 s for their own hits (17824.661:
 -- two lines, a tank's damage shield 0.010 s and the tank's swing 0.037 s later shown, both Windfury hits
 -- then dropped).
-local function ClogFind(now, hit)
+-- shieldOnly (1.31.23): only a damage shield's line (FFT.SchoolPossible)
+local function ClogFind(now, hit, plate, shieldOnly)
     SetAsideSwingMessages()
     local school = (not hit.miss) and hit.school or nil
     local best, bestD, bestKnows, bestEarly
     local air, asked
     for _, m in ipairs(clogMsgs) do
         local d = math.abs(m.t - now)
-        if not m.used and d <= CLOG_WINDOW and m.t - now <= LINE_AFTER_HIT and KindFits(m.kind, hit) then
+        if not m.used and d <= CLOG_WINDOW and m.t - now <= LINE_AFTER_HIT and KindFits(m.kind, hit)
+            and (not shieldOnly or m.shield) then
             local early = now - m.t > SAME_FRAME
             if early and not asked then
                 asked = true
-                air = (not hit.miss) and InTheAir(hit.school, now) or nil
+                air = (not hit.miss) and InTheAir(hit.school, now, plate) or nil
             end
             if not early or air then
                 local knows = LineKnows(m, school)
@@ -2633,13 +2681,13 @@ local function ClogFind(now, hit)
     end
     if best then return best, bestEarly and air or nil end
     if hit.miss then return nil end
-    if not asked then air = InTheAir(hit.school, now) end
+    if not asked then air = InTheAir(hit.school, now, plate) end
     if not air then return nil end
     for _, m in ipairs(clogMsgs) do
         local d = now - m.t
         -- (1.20.0) never a line from before that cast: it was some other hit's
         if not m.used and d > CLOG_WINDOW and d <= CLOG_LOOKBACK and KindFits(m.kind, hit)
-            and not (air.t and m.t < air.t - SAME_FRAME) then
+            and (not shieldOnly or m.shield) and not (air.t and m.t < air.t - SAME_FRAME) then
             return m, air
         end
     end
@@ -2647,7 +2695,7 @@ end
 
 -- How many of your unused lines in this hit's moment could stand for it, and does one of them
 -- know its school (for choosing, see ClogResolveFrame)
-local function LinesInMoment(now, hit)
+local function LinesInMoment(now, hit, plate)
     local n, knows = 0, false
     local school = (not hit.miss) and hit.school or nil
     local air, asked
@@ -2657,7 +2705,7 @@ local function LinesInMoment(now, hit)
         if fits and now - m.t > SAME_FRAME then -- (1.28.14) from an earlier frame: see ClogFind
             if not asked then
                 asked = true
-                air = (not hit.miss) and InTheAir(hit.school, now) or nil
+                air = (not hit.miss) and InTheAir(hit.school, now, plate) or nil
             end
             fits = air ~= nil
         end
@@ -2750,17 +2798,27 @@ end
 
 -- Has something of yours hit with this school just now? Your spell in flight or its cast,
 -- your DoT on this mob, your totem's attack. Schools as learned before (spellSchools, minionSchools).
+-- (1.31.16) Narrowed, now that every spell's school is learned (FFT.SchoolFromLine): a cast counts
+-- at the mob it was cast at, in its own moment or while still on its way, and a spell on the mob
+-- only once it was seen to tick (a learned beat). Before, any cast of the school in the last 2.5 s
+-- counted, landed or not and on any mob, and any spell cast on the mob in the last 40 s: with
+-- Stormstrike learned as physical that put every stranger's physical hit first. Replayed against
+-- the game's file of the author's 2026-11-13 20:11 dungeon log: a rogue's physical hit took the
+-- line of a Lightning Bolt in its cast's frame (217689.774) and a hunter's that of a Flame Shock
+-- tick (217344.560), the author's own hits then dropped.
 local function RecentSchool(plate, school, now)
     if not school then return false end
     for _, c in ipairs(ownCasts) do
-        if now - c.t <= FLIGHT_WINDOW and SpellSchool(c.name) == school then return true end
+        local dt = now - c.t
+        if dt <= FLIGHT_WINDOW and SpellSchool(c.name) == school and (c.plate == nil or c.plate == plate)
+            and (not c.landed or dt <= SAME_MOMENT) then return true end
     end
     for _, c in ipairs(minionCasts) do
         local dt = now - c.t
         if dt >= -SAME_MOMENT and dt <= MINION_WINDOW and MinionSchool(c.id) == school then return true end
     end
     for _, d in pairs(dots[plate] or {}) do -- a recast's previous cast ("#prev") may still tick too
-        if now - d.t0 <= DOT_WATCH and SpellSchool(d.name) == school then return true end
+        if now - d.t0 <= DOT_WATCH and SpellSchool(d.name) == school and DotInfo(d.name) then return true end
     end
     return false
 end
@@ -2773,6 +2831,26 @@ end
 -- (7ms) before the bolt's own Nature hit came, which then had none.
 -- Each batch is decided once, CLOG_WINDOW after its first hit (1.23.3: no second look, see ClogDecide).
 local clogPending = {}
+
+-- (1.31.16) A spell's miss line in its cast's own frame: an instant spell that missed. Its cast is
+-- over (misses that aren't shown never said so, and the spell counted as on its way for 2.5 s).
+-- (1.31.20) Not while a hit on the cast's mob from that frame waits to be decided: the cast
+-- landed, and the miss line is something else's. The 2026-11-14 08:47 log, 5178.577: Stormstrike
+-- hit, and the miss in its frame was Windfury Totem's attack ("your Stormstrike missed" logged).
+function FFT.MissLine(t)
+    C_Timer.After(0, function()
+        for _, c in ipairs(ownCasts) do
+            if not c.landed and math.abs(c.t - t) <= SAME_FRAME then
+                for _, p in ipairs(clogPending) do
+                    if p.plate == c.plate and not p.hit.miss and math.abs(p.now - t) <= SAME_FRAME then return end
+                end
+                c.landed = true
+                if logging then Log("  a miss line in your %s's frame and no hit of it: missed, not on its way", c.name) end
+                return
+            end
+        end
+    end)
+end
 
 -- Where a hit's nameplate was when the hit came. Deciding takes up to CLOG_WINDOW; if the plate is
 -- gone by then (the mob died: plates go when units do), the number shows where it was, as
@@ -2787,14 +2865,19 @@ end
 local function ShowClogHit(p, why, who)
     if p.hit.crit then FFT.critAt[p.plate] = GetTime() end -- (1.31.11) also when not drawn
     if plates[p.plate] == p.st or FFT.ToSpot(p.plate) then return ShowHit(p.plate, p.hit, why, who) end
-    if not p.ax then
-        return Log("  yours, not drawn: %s (%s; its nameplate went away)%s", S(p.hit.text), why, FFT.Which(p.hit))
+    -- (1.31.16) Where the plate's place couldn't be read (dungeons: positions are secret), at the
+    -- damage position: before, such a number was only logged. The author's two dungeon logs of
+    -- 2026-11-13 lost 9 that way, all swings decided 0.2 s or more after the hit, the mob dead by then.
+    local ax, ay, key, where = p.ax, p.ay, p.plate, "shown where it was"
+    if not ax then
+        ax, ay = FFT:SpotAnchor("damage")
+        key, where = "damage", "shown at the damage position"
     end
-    Log("  show %s (%s; its nameplate went away, shown where it was)%s", S(p.hit.text), why, FFT.Which(p.hit))
+    Log("  show %s (%s; its nameplate went away, %s)%s", S(p.hit.text), why, where, FFT.Which(p.hit))
     if FFT:TooSmall(p.hit.amount) then return end
     local color = p.hit.color
     if who == "pet" and db.schoolColors and not p.hit.miss then color = Color("colorPet") end
-    FFT:Show(nil, p.hit.text, color, p.hit.crit, HitOpts(p.hit, {anchorX = p.ax, anchorY = p.ay, key = p.plate}))
+    FFT:Show(nil, p.hit.text, color, p.hit.crit, HitOpts(p.hit, {anchorX = ax, anchorY = ay, key = key}))
     if p.hit.crit then FFT:CritSound() end
 end
 
@@ -2835,7 +2918,15 @@ end
 -- proc's (the same log: a triggered spell's SPELL_MISSED 0.02-0.03 s after its swing). Not while a
 -- cast of yours that you sent could still be this hit's own (an instant whose hit comes a frame
 -- late). Shamans only, as the extra swing: other classes' on-hit effects aren't measured.
-SWING_QUICK.TOTEM_HIT = {from = 0.010, to = 0.070}
+-- (1.31.20) From the swing's or the cast's own frame, up to 0.15 s after it (was 0.010-0.070 s, as
+-- it came in that dungeon log). The author's 2026-11-14 08:47 log (solo, the game's file beside it):
+-- 6 SPELL_DAMAGE / SPELL_MISSED "Windfury Totem", every one in the very frame of the swing or the
+-- Stormstrike that set it off (5150.771, 5181.599, 5190.267, 5214.912; once 0.111 s after a
+-- Stormstrike, 5118.818, with the weapon enchant's lines), so none of the 5 that landed was told:
+-- 12 procs in 2.3 minutes, 4 of them the totem and the enchant together, and 5 "Windfury!", never
+-- "x2". In a cast's frame the cast's own hit comes first (the cast not landed yet: not this one);
+-- the next physical hit there with a line is Windfury's.
+SWING_QUICK.TOTEM_HIT = {to = 0.15}
 function SWING_QUICK.TotemHit(p, m)
     local hit, W = p.hit, SWING_QUICK.TOTEM_HIT
     if hit.miss or hit.school ~= 1 or m.kind ~= "damage" or m.periodic or math.abs(m.t - p.now) > SAME_FRAME then return false end
@@ -2846,7 +2937,7 @@ function SWING_QUICK.TotemHit(p, m)
             local known = SpellSchool(c.name)
             if not (known and known ~= 1) then return false end -- this hit can be that cast's own
         end
-        if c.landed and c.plate == p.plate and dt >= W.from and dt <= W.to then
+        if c.landed and c.plate == p.plate and dt >= -SAME_FRAME and dt <= W.to then
             local known = SpellSchool(c.name) -- (a physical spell's school may not be learned: Stormstrike's isn't)
             if not known or known == 1 then after = true end
         end
@@ -2855,16 +2946,150 @@ function SWING_QUICK.TotemHit(p, m)
         local sw = swings[i]
         local dt = p.now - sw.t
         if dt > W.to then break end
-        if dt >= W.from and sw.plate == p.plate and sw.hand == 0 and not sw.ranged and not sw.form then after = true end
+        if dt >= -SAME_FRAME and sw.plate == p.plate and sw.hand == 0 and not sw.ranged and not sw.form then after = true end
     end
     if not after then return false end
     local ok, _, class = pcall(UnitClass, "player")
     return ok and Plain(class) == "SHAMAN"
 end
 
+-- (1.31.16) Which school each of your spells hits as, learned from your Combat Log lines. Until
+-- now only the ways used without the Combat Log taught it (your threat rising with the hit, your
+-- own actions), so with the Combat Log in use from the first login nothing did: the author's
+-- saved schools held one spell after two weeks of play, with 113 Earth Shocks in two dungeon logs
+-- (2026-11-13). The school is what tells a spell still on its way (InTheAir), a hit that can't be
+-- a cast's own (MarkLanded, SameMomentCast), and which of several hits in one moment is yours
+-- (RecentSchool); a damage-over-time spell's exact beat needs it too (LearnFromLine).
+-- A lesson is a hit alone in its moment with one damage line of yours in its own frame, not a
+-- tick's, and either one cast of yours at that mob in that frame (an instant spell), or none in
+-- the frame and one spell of yours at that mob still on its way. Not just after your swing (its
+-- proc's hit comes there) nor after your totem's or pet's attack (its hit comes with its line).
+-- Counted as votes (FFT.VoteSchool): one coincidence teaches nothing.
+function FFT.NoMinionNow(now)
+    for _, c in ipairs(minionCasts) do
+        local dt = now - c.t
+        if dt >= -SAME_MOMENT and dt <= 1.5 then return false end
+    end
+    return MinionCastLine(now) == nil
+end
+function FFT.SchoolFromLine(p, m, lonely)
+    local school = (not p.hit.miss) and p.hit.school or nil
+    if not (lonely and school and clog.byEvent and m.kind == "damage" and not m.periodic) then return end
+    if math.abs(m.t - p.now) > SAME_FRAME then return end
+    for _, sw in ipairs(swings) do
+        local dt = p.now - sw.t
+        if not sw.ranged and dt >= -SAME_FRAME and dt <= PROC_MAX then return end
+    end
+    if not FFT.NoMinionNow(p.now) then return end
+    local inFrame, flying, nFrame, nFlying = nil, nil, 0, 0
+    for _, c in ipairs(ownCasts) do
+        local dt = p.now - c.t
+        if math.abs(dt) <= SAME_FRAME then
+            nFrame, inFrame = nFrame + 1, c
+        elseif not c.landed and c.sent ~= false and c.plate == p.plate and dt > SAME_MOMENT and dt <= FLIGHT_WINDOW then
+            nFlying, flying = nFlying + 1, c
+        end
+    end
+    if nFrame == 1 and inFrame.plate == p.plate then
+        FFT.VoteSchool(inFrame, school, "its hit and line in its cast's frame")
+    elseif nFrame == 0 and nFlying == 1 then
+        FFT.VoteSchool(flying, school, "its hit and line while it was on its way")
+    end
+end
+-- A spell that flies brings its line before its hit most of the time (Lightning Bolt: 34 of 39 in
+-- the author's 2026-11-13 20:11 log, 0.007-0.118 s before), and such a hit is taken only while a
+-- spell of its school is on its way: with the school not learned yet, never, so the lesson above
+-- would come from one cast in eight. Outside a group, where a hit on the mob you cast at is
+-- yours, the hit is taken and counts as a vote when it is alone in its moment, not physical, one
+-- spell of yours whose school isn't learned is on its way to that mob, and one unused damage line
+-- of yours (not a tick's) came since that cast, up to CLOG_LOOKBACK before the hit.
+-- Returns the line and the cast, or nil.
+function FFT.UnlearnedFlight(p)
+    local school = (not p.hit.miss) and p.hit.school or nil
+    if not (p.alone and school and school ~= 1 and clog.byEvent) or IsInGroup() then return nil end
+    local cast, casts = nil, 0
+    for _, c in ipairs(ownCasts) do
+        local dt = p.now - c.t
+        if not c.landed and c.sent ~= false and c.plate == p.plate and dt > SAME_MOMENT and dt <= FLIGHT_WINDOW
+            and SpellSchool(c.name) == nil then
+            casts, cast = casts + 1, c
+        end
+    end
+    if casts ~= 1 or not FFT.NoMinionNow(p.now) then return nil end
+    local line, lines = nil, 0
+    for _, m in ipairs(clogMsgs) do
+        local before = p.now - m.t
+        if not m.used and m.kind == "damage" and not m.periodic and before > SAME_FRAME and before <= CLOG_LOOKBACK
+            and m.t >= cast.t - SAME_FRAME then
+            lines, line = lines + 1, m
+        end
+    end
+    if lines ~= 1 then return nil end
+    return line, cast
+end
+
+-- (1.31.23) A hit of a school you aren't known to deal takes no line of yours. The author's
+-- 2026-11-14 11:55 log (solo, the game's file beside it; a paladin fighting the same mobs):
+-- 16554.234, the paladin's Holy Strike crit on one mob in the very frame of the author's two
+-- Windfury lines for another: shown as his, a holy number on a shaman, and one Windfury attack
+-- left without its line. The dungeon logs have the same with a hunter's arcane and a priest's
+-- shadow hits. A line's color says the kind of event, never the school, so any hit in a line's
+-- frame could take it.
+-- Known: physical, and every school a spell of yours or an attack of your totems and pet was
+-- learned to hit as (spellSchools, minionSchools). Another school still counts while something of
+-- yours could be teaching it: a cast of yours with no school learned (in its own moment, or one
+-- you sent still on its way to that mob), your totem's or pet's attack with none learned (or, with
+-- no totem school learned at all, a cast line with no cast of yours), a hit on the mob you swung at
+-- up to 0.2 s after the swing (a proc of the swing), or a damage shield's own line (Thorns: no
+-- cast, any school), or a tick's line while a spell of yours with no school learned is on that mob.
+-- Needs event colors.
+function FFT.SchoolPossible(p, school, m)
+    if not clog.byEvent then return true end
+    local known = 1
+    for _, s in pairs(db.spellSchools or {}) do
+        if type(s) == "number" then known = bit.bor(known, s) end
+    end
+    for _, s in pairs(db.minionSchools or {}) do
+        if type(s) == "number" then known = bit.bor(known, s) end
+    end
+    if bit.band(school, known) ~= 0 then return true end
+    -- a tick's line, with a spell of yours on that mob whose school isn't learned (one that only
+    -- ticks never teaches it: its ticks count as long as it was cast there in the last 40 s)
+    if m and m.periodic then
+        for _, d in pairs(dots[p.plate] or {}) do
+            if SpellSchool(d.name) == nil and p.now - d.t0 <= DOT_WATCH then return true end
+        end
+    end
+    for _, c in ipairs(ownCasts) do
+        local dt = p.now - c.t
+        if SpellSchool(c.name) == nil and dt >= -SAME_MOMENT and (dt <= SAME_MOMENT
+            or (dt <= FLIGHT_WINDOW and c.sent ~= false and not c.landed and (c.plate == nil or c.plate == p.plate))) then
+            return true
+        end
+    end
+    for _, c in ipairs(minionCasts) do
+        local dt = p.now - c.t
+        if MinionSchool(c.id) == nil and dt >= -SAME_MOMENT and dt <= 1.5 then return true end
+    end
+    if not next(db.minionSchools or {}) and MinionCastLine(p.now) then return true end
+    for _, sw in ipairs(swings) do
+        local dt = p.now - sw.t
+        if not sw.ranged and sw.plate == p.plate and dt >= -SAME_FRAME and dt <= PROC_MAX then return true end
+    end
+    return false
+end
+
 local function ClogDecide(p)
-    local lonely = p.alone and LinesInMoment(p.now, p.hit) == 1
-    local m, air = ClogFind(p.now, p.hit)
+    local lonely = p.alone and LinesInMoment(p.now, p.hit, p.plate) == 1
+    local m, air = ClogFind(p.now, p.hit, p.plate)
+    -- (1.31.23) a line in the hit's own frame (one from before needs your spell of that school on
+    -- its way already): not for a school you aren't known to deal, unless it is a damage shield's
+    if m and not air and not m.shield and not p.hit.miss and p.hit.school and p.hit.school ~= 1
+        and not FFT.SchoolPossible(p, p.hit.school, m) then
+        if logging then Log("  school %d isn't one you are known to deal, and nothing of yours is unexplained now: no line for it", p.hit.school) end
+        m, air = ClogFind(p.now, p.hit, p.plate, true)
+        lonely = false
+    end
     if m then
         m.used = true
         local school = (not p.hit.miss) and p.hit.school or nil
@@ -2887,9 +3112,11 @@ local function ClogDecide(p)
             end
             if not ownNow and school then VoteMinion(p.plate, p.hit, p.now) end
             totem = SWING_QUICK.TotemHit(p, m) -- before MarkLanded: a cast still on its way counts
+            if not totem then FFT.SchoolFromLine(p, m, lonely) end -- (1.31.16) before MarkLanded too
             MarkLanded(school, p.now)
             LearnFromLine(p.plate, p.hit, p.now, m) -- (1.21.0) facts for the fallback
         end
+        if totem then FFT.Recolor(p.hit, false) end -- (1.31.19) Windfury's: the physical color
         ShowClogHit(p, ("your Combat Log line, %+.3fs%s"):format(m.t - p.now,
             air and (", while your " .. (air.name or "spell") .. " was on its way") or ""))
         if totem then
@@ -2897,6 +3124,14 @@ local function ClogDecide(p)
             if FFT.OnWindfury then FFT:OnWindfury() end
         end
         return
+    end
+    -- (1.31.16) outside a group: your spell on its way to this mob whose school isn't learned yet
+    local um, uc = FFT.UnlearnedFlight(p)
+    if um then
+        um.used, uc.landed = true, true
+        FFT.VoteSchool(uc, p.hit.school, "its line before its hit, outside a group")
+        return ShowClogHit(p, ("your Combat Log line, %+.3fs, while your %s was on its way (its school not learned yet)")
+            :format(um.t - p.now, uc.name))
     end
     -- (1.17.0) a line from long before: a shot's from its frame, or a melee line
     -- of your pet's or an extra attack of yours
@@ -2922,6 +3157,7 @@ local function ClogDecide(p)
     -- ByCombatLog): a heal's line may come just after the heal.
     local ksw, kd = SWING_QUICK.AfterKill(p)
     if ksw then
+        FFT.Recolor(p.hit, true)
         return ShowClogHit(p, ("your %s, its number %.2fs after your killing blow"):format(
             ksw.extraOf and "extra swing (Windfury Totem)" or "swing", kd))
     end
@@ -2954,7 +3190,7 @@ local function ClogResolveFrame()
         p.alone = false
         local score = 0
         if not p.hit.miss and RecentSchool(p.plate, p.hit.school, p.now) then score = score + 2 end
-        local _, knows = LinesInMoment(p.now, p.hit)
+        local _, knows = LinesInMoment(p.now, p.hit, p.plate)
         if knows then score = score + 2 end
         if target and p.plate == target then score = score + 1 end
         p.score = score
@@ -3052,10 +3288,12 @@ local function ResolveSwing(sw)
     -- not over the new mob: before, only "is the plate showing" was checked.
     for _, cand in ipairs(sw.cands) do
         if cand == best then
+            FFT.Recolor(cand.hit, true) -- (1.31.19) a swing's: the auto-attack color
             ShowClogHit(cand, ("your %s, %.2fs after it%s"):format(
                 sw.extraOf and "extra swing (Windfury Totem)" or "swing", cand.d,
                 sw.afterCast and (", later as your " .. sw.afterCast .. " came with it") or ""))
         elseif cand == twin then
+            FFT.Recolor(cand.hit, true)
             ShowClogHit(cand, ("your extra swing (Windfury Totem), with your swing's hit %.2fs after it"):format(cand.d))
         elseif FFT:ClogActive() then
             ClogMatch(cand.plate, cand.hit, cand.now, cand)
@@ -3150,29 +3388,67 @@ end
 -- line came at 40439.024 and the totem's at 40439.193. The Stormstrike's line seemed to pay the
 -- totem's debt, so the totem's line was taken for a Windfury proc: a groupmate's Deep Wound got it
 -- ("Windfury!" shown) and the totem's fire hit (40439.389) was dropped.
-local function TotemLinesOwed(t, now)
-    local function LineSince(t0)
-        for _, y in ipairs(clogMsgs) do
-            if y.kind == "damage" and y.t >= t0 - SAME_FRAME and y.t <= now + SAME_FRAME
-                and math.abs(y.t - t) > SAME_FRAME and not OwnCastAt(y.t) then
-                return true
-            end
+-- has a damage line come since t0 (up to now) in another frame than t's, not in a cast of yours'?
+function FFT.LineSince(t0, t, now) -- (1.31.17) made once, not at every look; a field: Lua's 200 locals
+    for _, y in ipairs(clogMsgs) do
+        if y.kind == "damage" and y.t >= t0 - SAME_FRAME and y.t <= now + SAME_FRAME
+            and math.abs(y.t - t) > SAME_FRAME and not OwnCastAt(y.t) then
+            return true
         end
-        return false
     end
+    return false
+end
+local function TotemLinesOwed(t, now)
+    local LineSince = FFT.LineSince
     local byPlate, byLine = 0, 0
     for _, c in ipairs(minionCasts) do
         local dt = t - c.t
-        if dt >= -SAME_FRAME and dt <= TOTEM_LINE_AFTER and not LineSince(c.t) then byPlate = byPlate + 1 end
+        if dt >= -SAME_FRAME and dt <= TOTEM_LINE_AFTER and not LineSince(c.t, t, now) then byPlate = byPlate + 1 end
     end
     for _, x in ipairs(clogMsgs) do
         local dt = t - x.t
         if x.kind == "cast" and not x.proc and dt >= -SAME_FRAME and dt <= TOTEM_LINE_AFTER and not OwnCastAt(x.t)
-            and not LineSince(x.t) then -- (1.31.0) not a game proc's line (FFT.NoteProcCast)
+            and not LineSince(x.t, t, now) then -- (1.31.0) not a game proc's line (FFT.NoteProcCast)
             byLine = byLine + 1
         end
     end
     return math.max(byPlate, byLine) -- one attack can show both ways
+end
+
+-- (1.31.20) Windfury on a swing that kills. The mob is dead, so the proc's attacks bring no number
+-- over a nameplate (through your target they may: FFT.Adopt, 1.31.22; then no second alert) and
+-- nothing told the proc: the author's 2026-11-14 08:47 log, 5234.508, a swing with your kill
+-- line and one damage line in its frame (SPELL_DAMAGE "Windfury Weapon" in the game's file) and
+-- no hit after; 3 of the 55 enchant procs of the 2026-11-13 10:28 dungeon log went the same way.
+-- So: your kill line in the frame of your main-hand swing, no cast of yours in that frame, and a
+-- damage line there (not a tick's) that no hit has taken once the frame is decided, beyond what
+-- your totem owes. Shamans only, as the other Windfury rules; once per frame of lines.
+function SWING_QUICK.KillProc(t)
+    C_Timer.After(CLOG_WINDOW + 0.03, function()
+        if not clog.byEvent then return end
+        -- (1.31.22) a cast you sent, not one the game triggers: the author's 2026-11-14 11:20 log,
+        -- 14656.580, a killing swing with Windfury Weapon's line and the triggered cast that comes
+        -- with some swings ("came with no UNIT_SPELLCAST_SENT") in its frame: no alert
+        for _, c in ipairs(anyCasts) do
+            if c.sent ~= false and math.abs(c.t - t) <= SAME_FRAME then return end
+        end
+        if SWING_QUICK.windfuryAt and math.abs(SWING_QUICK.windfuryAt - t) <= SAME_FRAME then return end
+        local swung = false
+        for _, sw in ipairs(swings) do
+            if math.abs(sw.t - t) <= SAME_FRAME and sw.hand == 0 and not sw.ranged and not sw.form then swung = true end
+        end
+        if not swung then return end
+        local lines = 0
+        for _, m in ipairs(clogMsgs) do
+            if m.kind == "damage" and not m.periodic and not m.used and math.abs(m.t - t) <= SAME_FRAME then lines = lines + 1 end
+        end
+        if lines == 0 or lines <= TotemLinesOwed(t, GetTime()) then return end
+        local ok, _, class = pcall(UnitClass, "player")
+        if not (ok and Plain(class) == "SHAMAN") then return end
+        SWING_QUICK.windfuryAt = t
+        Log("  Windfury on your killing swing: %d damage line(s) in its frame and no hit to come", lines)
+        if FFT.OnWindfury then FFT:OnWindfury() end
+    end)
 end
 
 -- The proc lines of one frame: its damage lines no hit took (or that a Windfury hit took),
@@ -3260,6 +3536,24 @@ local function InSlot(gap, anims)
     return false
 end
 
+-- A line of the proc at t, if one is left (its lines, less those a Windfury hit took), for a hit
+-- now. swingAt: the swing's moment when the lines came after its frame, else nil
+function SWING_QUICK.LineIn(now, t, swingAt, anims)
+    local n = ProcLinesAt(t, now)
+    if not n then return nil end
+    local taken = 0
+    for _, m in ipairs(clogMsgs) do
+        if m.extra and math.abs(m.t - t) <= SAME_FRAME then taken = taken + 1 end
+    end
+    if n - taken <= 0 then return nil end
+    for _, m in ipairs(clogMsgs) do
+        if m.kind == "damage" and not m.used and math.abs(m.t - t) <= SAME_FRAME then
+            if InSlot(now - m.t, anims) then return m, swingAt and "lines" or nil end
+            if swingAt and InSlot(now - swingAt, anims) then return m, "swing" end
+        end
+    end
+end
+
 -- An unused line of a proc for this physical hit: from your swing's proc on this mob, or from a
 -- proc in your Stormstrike's frame (Windfury procs from it too, 560423.060 and 560461.639 in the
 -- 09:59 log, its second attack 0.505 s and 0.500 s after; then no swing waits). Returns the line,
@@ -3297,26 +3591,14 @@ local function ExtraAttackLine(plate, hit, now)
     -- strangers' (182177.122: a rogue's two instants 0.19 s after the lines, both attacks then
     -- dropped), and in the 2026-11-11 dungeon log 40901.612 / .632. Replayed against the game's
     -- files: +3 of the author's and -3 of others' in the first, -2 of others' in the second.
-    -- a line of the proc at t, if one is left (its lines, less those a Windfury hit took).
-    -- swingAt: the swing's moment when the lines came after its frame, else nil
-    local function LineIn(t, swingAt, anims)
-        local n = ProcLinesAt(t, now)
-        if not n then return nil end
-        local taken = 0
-        for _, m in ipairs(clogMsgs) do
-            if m.extra and math.abs(m.t - t) <= SAME_FRAME then taken = taken + 1 end
-        end
-        if n - taken <= 0 then return nil end
-        for _, m in ipairs(clogMsgs) do
-            if m.kind == "damage" and not m.used and math.abs(m.t - t) <= SAME_FRAME then
-                if InSlot(now - m.t, anims) then return m, swingAt and "lines" or nil end
-                if swingAt and InSlot(now - swingAt, anims) then return m, "swing" end
-            end
-        end
-    end
+    -- (1.31.17) SWING_QUICK.LineIn (above) and the slowest learned delays are made once, not for
+    -- every physical hit on a nameplate: a function and a sorted list each time before
+    local LineIn = SWING_QUICK.LineIn
+    local base, asked
     for _, sw in ipairs(swings) do
         if sw.plate == plate and SwingProc(sw, now) then
-            local m, from = LineIn(sw.procAt, bySwing and sw.procAt - sw.t >= SWING_QUICK.LINES_LATE and sw.t or nil, SWING_QUICK.BaseAnims())
+            if not asked then base, asked = SWING_QUICK.BaseAnims(), true end
+            local m, from = LineIn(now, sw.procAt, bySwing and sw.procAt - sw.t >= SWING_QUICK.LINES_LATE and sw.t or nil, base)
             if m then return m, sw, from end
         end
     end
@@ -3325,7 +3607,8 @@ local function ExtraAttackLine(plate, hit, now)
         -- off): that bolt's line, left unused 0.149 s after its cast, was read as a late proc line,
         -- and a stranger's physical hit 0.52 s later shown with "Windfury!" (183317.941)
         if c.plate == plate and now - c.t <= 0.6 + PROC_AFTER_CAST and (SpellSchool(c.name) or 1) == 1 then
-            local m = LineIn(c.t, nil, SWING_QUICK.BaseAnims())
+            if not asked then base, asked = SWING_QUICK.BaseAnims(), true end
+            local m = LineIn(now, c.t, nil, base)
             if m then return m, c end
             -- (1.28.11) its lines after the cast's frame (see PROC_AFTER_CAST)
             local tried
@@ -3334,7 +3617,7 @@ local function ExtraAttackLine(plate, hit, now)
                 if x.kind == "damage" and not x.used and after > SAME_FRAME and after <= PROC_AFTER_CAST
                     and x.t ~= tried then
                     tried = x.t
-                    local late, from = LineIn(x.t, bySwing and after >= SWING_QUICK.LINES_LATE and c.t or nil, SWING_QUICK.BaseAnims())
+                    local late, from = LineIn(now, x.t, bySwing and after >= SWING_QUICK.LINES_LATE and c.t or nil, base)
                     if late then return late, c, from end
                 end
             end
@@ -3437,6 +3720,7 @@ local function ClogHit(plate, hit, now)
             SWING_QUICK.windfuryAt = xm.t
             if FFT.OnWindfury then FFT:OnWindfury() end
         end
+        FFT.Recolor(hit, false) -- (1.31.19) Windfury's attacks: the physical color
         return ShowHit(plate, hit, ("your extra attack (Windfury), its line %.2fs before%s"):format(now - xm.t,
             from == "swing" and (", %.2fs after your %s"):format(now - of.t, of.name or "swing") or ""))
     end
@@ -3523,6 +3807,7 @@ function FFT:OnUnitCombat(unit, action, flag, amount, school)
         -- (1.30.0) only while your target has no nameplate: with one, the plate's report comes too
         if PlateOf("target") then return end
         plate = FFT.TargetPseudo()
+        if plate then FFT.Adopt(plate) end -- (1.31.22) what you did at it while it had a nameplate
     elseif unit:find("^nameplate") then
         plate = PlateOf(unit)
     end
@@ -3611,409 +3896,6 @@ function FFT:OnInterrupted(unit)
 end
 
 ------------------------------------------------------------------------
--- Blizzard's own damage numbers
-------------------------------------------------------------------------
--- Names and meanings from Forever 1.60.1's own CVar list (Ketho/BlizzardInterfaceResources,
--- branch "forever", Resources/CVars.lua). Only these four are about your numbers over mobs.
--- Blizzard's text over your own character (enableFloatingCombatText, SELF_CVAR below) is handled
--- apart: off while "Show damage I take" replaces it, or on with its frame hidden while a feature
--- reads the COMBAT_TEXT_UPDATE feed (FeedWanted).
-local HEAL_CVAR = "floatingCombatTextCombatHealing_v2" -- "Display amount of healing you did to the target"
--- Its listed description is "values for effects on other players", but turning it off is what
--- removed Blizzard's "Interrupted" over mobs you interrupt (tested in game, 1.60.1).
-local INTERRUPT_CVAR = "floatingCombatTextSpellMechanics_v2"
--- "Whether to show floating combat text for the player". Blizzard's combat text always shows
--- damage taken while it's on (DAMAGE has show = 1 in CombatTextConstants.lua), so it's the
--- only way to hide theirs; it also takes their low health/mana and ability alerts with it.
--- Turning it off removed Blizzard's damage taken under the character (tested in game, 1.60.1).
-local SELF_CVAR = "enableFloatingCombatText"
--- Blizzard's "Energy Gains" over your character (CombatTextConstants.lua ENERGIZE, and
--- PERIODIC_ENERGIZE in Mainline/CombatTextConstantsOverrides.lua); not secure in Forever's CVar list.
--- (1.24.0) These, and SELF_CVAR, are also the source of the COMBAT_TEXT_UPDATE feed that brings
--- resource gains to addons, so all three stay on and Blizzard's frame is hidden instead. 1.22.0-1.23.4
--- set them to "0", and Mana Spring Totem's ticks never reached the addon: the 2026-11-09 07:36 log has
--- no ENERGIZE line at all (UNIT_COMBAT doesn't report periodic gains). So while "Show power gains" is
--- on they're kept "1", and Blizzard's text is hidden by hiding its CombatText frame (below).
--- (1.25.0) SELF_CVAR also stays "1" for "Show buffs gained / faded" (FeedWanted).
-local ENERGY_CVARS = {
-    floatingCombatTextEnergyGains_v2 = true,
-    floatingCombatTextPeriodicEnergyGains_v2 = true,
-}
--- (1.22.1) Blizzard's "Combat State" ("Entering Combat" over your character, CombatTextConstants.lua);
--- "0" by default and not secure in Forever's CVar list. Hidden only while ours is on.
-local COMBAT_STATE_CVAR = "floatingCombatTextCombatState_v2"
-local BLIZZARD_CVARS = {
-    "floatingCombatTextCombatDamage_v2",             -- "Display damage numbers over hostile creatures when damaged"
-    "floatingCombatTextCombatLogPeriodicSpells_v2",  -- "Display damage caused by periodic effects"
-    "floatingCombatTextPetMeleeDamage_v2",           -- "Display pet melee damage in the world"
-    "floatingCombatTextPetSpellDamage_v2",           -- "Display pet spell damage in the world"
-    HEAL_CVAR,                                       -- hidden only while "Show my heals" is on
-    INTERRUPT_CVAR,                                  -- hidden only while "Show my interrupts" is on
-    SELF_CVAR,                                       -- hidden only while "Show damage I take" is on
-    "floatingCombatTextEnergyGains_v2",              -- kept ON while "Show power gains" is on (the feed)
-    "floatingCombatTextPeriodicEnergyGains_v2",      -- (the same)
-    COMBAT_STATE_CVAR,                               -- hidden only while "Show entering / leaving combat" is on
-}
-local blizzardPending = false
-
-local function WantHidden(cvar)
-    if not (db.enabled and db.hideBlizzard) then return false end
-    if cvar == HEAL_CVAR then return db.showHeals end
-    if cvar == INTERRUPT_CVAR then return db.showInterrupts end
-    if cvar == SELF_CVAR then return db.showIncoming end
-    if ENERGY_CVARS[cvar] then return false end -- (1.24.0) never by CVar: they carry the feed
-    if cvar == COMBAT_STATE_CVAR then return db.showCombatState end
-    return true
-end
-
--- (1.25.0) The features that read the COMBAT_TEXT_UPDATE feed: power gains, buffs on you and
--- (1.26.0) who healed you.
--- SELF_CVAR carries the whole feed; the energy CVars only the power kinds. Buff kinds came with
--- floatingCombatTextAuras_v2 at "0" (2026-11-09 08:04 log), so that one isn't touched.
-local function FeedWanted()
-    return db.enabled and (db.showPower or db.showAuras or db.showLowWarnings -- (1.28.7)
-        or db.showGameProcs -- (1.31.0) the game's proc notices (Procs.lua)
-        or db.showReactives -- (1.31.0) the game's reactive ability notices (Procs.lua)
-        or (db.showIncoming and db.showIncomingHeals and db.showHealerNames)) -- (1.26.0)
-end
-
--- "1" / "0" to set, nil to leave as the player had it. The feed wins over hiding: while a feature
--- needs it, SELF_CVAR stays "1" and Blizzard's text is hidden by its frame instead.
-local function CVarTarget(cvar)
-    if not db.enabled then return nil end
-    if cvar == SELF_CVAR and FeedWanted() then return "1" end
-    if ENERGY_CVARS[cvar] and db.showPower then return "1" end
-    if WantHidden(cvar) then return "0" end
-    return nil
-end
-
--- (1.24.0) Blizzard's own text over your character, while SELF_CVAR is on only for the feed.
--- Hidden when "Show damage I take" replaces it, or when your own choice was "off" (the value
--- saved before the addon changed it). The same as SELF_CVAR "0" did, so its low health / mana
--- and ability alerts go with it, as before.
-local function BlizzardSelfTextHidden()
-    if not db.enabled then return false end
-    if C_CVar.GetCVar(SELF_CVAR) ~= "1" then return false end -- nothing drawn anyway
-    if db.hideBlizzard and db.showIncoming then return true end
-    local own = db.savedCVars and db.savedCVars[SELF_CVAR]
-    return FeedWanted() and own == "0"
-end
-
--- Blizzard's text for the kinds the addon shows itself, when its frame stays visible: their `show`
--- is cleared (CombatTextTypeInfo, CombatTextConstants.lua and Mainline/CombatTextConstantsOverrides.lua),
--- Blizzard's UpdateDisplayedMessages sets `show` again from the CVar, so this runs
--- after it too. kind -> the setting that replaces it.
-local OWN_KINDS = {
-    ENERGIZE = "showPower", PERIODIC_ENERGIZE = "showPower",
-    SPELL_AURA_START = "showAuras", SPELL_AURA_START_HARMFUL = "showAuras",
-    SPELL_AURA_END = "showAuras", SPELL_AURA_END_HARMFUL = "showAuras",
-    SPELL_CAST = "showGameProcs", -- (1.31.0) "<Maelstrom Ready!>": shown at the procs spot instead
-    SPELL_ACTIVE = "showReactives", -- (1.31.0) "<Overpower>": the same
-}
-local function HideBlizzardKinds()
-    local types = _G.CombatTextTypeInfo
-    if type(types) ~= "table" then return end
-    -- (1.28.9) Only ever cleared, never set. Before, a kind whose feature was off got `show = 1`
-    -- back from here when its CVar was "1": a value written by an addon, and Blizzard's OnEvent,
-    -- having read it, ran tainted and failed on the hidden values it then handled. Seen in game
-    -- 2026-11-10 (buffs off, floatingCombatTextAuras_v2 1, a buff gained): "CombatText.lua:364:
-    -- attempt to compare local 'lowestMessage' (a secret number value, while execution tainted by
-    -- 'ForeverFloatingText')". A cleared `show` did no such thing (12:33 log, no error). So a kind
-    -- whose feature is turned off stays hidden until Blizzard sets it again itself
-    -- (UpdateDisplayedMessages: at load, or when its combat text is switched on).
-    for kind, setting in pairs(OWN_KINDS) do
-        local info = types[kind]
-        if type(info) == "table" and db.enabled and db.hideBlizzard and db[setting] and info.show ~= nil then
-            info.show = nil
-        end
-    end
-end
-
--- Called after the CVars change and when Blizzard_CombatText loads (it loads when SELF_CVAR is
--- turned on: Settings.LoadAddOnCVarWatcher in CombatOverrides.lua). Its OnEvent returns at once
--- while the frame isn't visible (CombatText.lua), so nothing of Blizzard's is drawn.
--- (1.28.7) Low health / mana: Blizzard's frame works them out itself on UNIT_HEALTH /
--- UNIT_POWER_UPDATE from UnitHealth / UnitPower (CombatText.lua: <= 20%, CombatTextConstants
--- LowHealthThreshold / LowManaThreshold, mana only), which are secret to addons (2026-11-09 08:04
--- log), and marks itself `lowHealth` / `lowMana` (1 or nil) as it crosses, only while visible.
--- So while "Show low health / mana" is on, the frame is kept shown at alpha 0 instead of hidden
--- (it draws, unseen) and a post-hook of its OnEvent shows the game's HEALTH_LOW / MANA_LOW
--- ("Health Low" / "Mana Low") at the alerts spot when a mark turns on. Not yet seen in game.
-local ctHooked, ctHiddenByUs = false, false
-local function MuteNotHide() return db.enabled and db.showLowWarnings end
-local LOW_MARKS = {
-    {field = "lowHealth", text = function() return HEALTH_LOW or "Health Low" end},
-    {field = "lowMana", text = function() return MANA_LOW or "Mana Low" end},
-}
-local LOW_AGAIN = 5 -- seconds: hovering at 20% doesn't repeat it
-local lowWas, lowShownAt = {}, {}
-local function CheckLowMarks(f)
-    for _, m in ipairs(LOW_MARKS) do
-        local v = rawget(f, m.field)
-        if not IsSecret(v) then
-            local on = v ~= nil and v ~= false
-            if on and not lowWas[m.field] then
-                local now = GetTime()
-                -- (1.31.6) not while dead or a ghost: at 0 the marks stay on (the author, 2026-11-12:
-                -- "now that i died, i see mana low health low"); UnitIsDeadOrGhost isn't secret (UnitDocumentation.lua)
-                local asked, dead = pcall(UnitIsDeadOrGhost, "player")
-                dead = asked and Plain(dead) == true
-                local shown = not dead and ctHiddenByUs and MuteNotHide() and FFT.ShowAlert
-                    and not (lowShownAt[m.field] and now - lowShownAt[m.field] < LOW_AGAIN)
-                Log("Blizzard's combat text: %s on%s", m.field, shown and ", shown" or dead and ", you're dead" or "")
-                if shown then
-                    lowShownAt[m.field] = now
-                    -- (1.31.12) a brief alert as you cross 20%, gone with the other alerts, as Blizzard's
-                    -- own (CombatText.lua: one HEALTH_LOW / MANA_LOW message per crossing, scrolling and
-                    -- fading as any). 1.31.0-1.31.11 kept it at the procs spot while under 20% (up to
-                    -- 600 s); the author, 2026-11-13: it should just show briefly.
-                    FFT:ShowAlert(m.text(), {1, 0.1, 0.1}) -- Blizzard's color for them
-                end
-            elseif not on and lowWas[m.field] then
-                Log("Blizzard's combat text: %s off", m.field)
-            end
-            lowWas[m.field] = on
-        end
-    end
-end
--- (1.31.6) Back alive (DeathInfoDocumentation.lua: PLAYER_ALIVE, PLAYER_UNGHOST), a mark still on
--- shows again at the next health / mana update. (Dying put the kept warnings away until 1.31.12;
--- they are brief now.) In a do block: this file is at Lua's limit of 200 locals.
-do
-    local death = CreateFrame("Frame")
-    death:RegisterEvent("PLAYER_ALIVE") -- also when released as a ghost: then still dead
-    death:RegisterEvent("PLAYER_UNGHOST")
-    death:SetScript("OnEvent", function()
-        local ok, dead = pcall(UnitIsDeadOrGhost, "player")
-        if ok and Plain(dead) == false then wipe(lowWas) end
-    end)
-end
-function FFT:ApplyBlizzardCombatTextFrame()
-    local frame = _G.CombatText
-    if type(frame) ~= "table" or type(frame.Hide) ~= "function" then return end
-    if not ctHooked then
-        ctHooked = true
-        frame:HookScript("OnShow", function(f)
-            if db and BlizzardSelfTextHidden() then
-                if MuteNotHide() then f:SetAlpha(0) else f:Hide() end
-                ctHiddenByUs = true
-            end
-        end)
-        frame:HookScript("OnEvent", function(f, event)
-            if db and (event == "UNIT_HEALTH" or event == "UNIT_POWER_UPDATE") then CheckLowMarks(f) end
-        end)
-        if type(frame.UpdateDisplayedMessages) == "function" then
-            hooksecurefunc(frame, "UpdateDisplayedMessages", function() if db then HideBlizzardKinds() end end)
-        end
-    end
-    if BlizzardSelfTextHidden() then
-        if MuteNotHide() then
-            frame:SetAlpha(0)
-            if not frame:IsShown() then frame:Show() end
-        else
-            if frame:IsShown() then frame:Hide() end
-            frame:SetAlpha(1)
-        end
-        ctHiddenByUs = true
-    elseif ctHiddenByUs then
-        ctHiddenByUs = false
-        frame:SetAlpha(1)
-        frame:Show()
-    end
-    HideBlizzardKinds()
-end
-
--- C_CombatText reports for one unit, set by Blizzard's CombatText frame (UpdateDisplayedMessages
--- calls C_CombatText.SetActiveUnit). If that frame never set one, the addon sets "player".
-function FFT:EnsureCombatTextUnit()
-    if not (C_CombatText and C_CombatText.GetActiveUnit and C_CombatText.SetActiveUnit) then return end
-    local ok, unit = pcall(C_CombatText.GetActiveUnit)
-    unit = ok and Plain(unit) or nil
-    if unit == nil and FeedWanted() then
-        local set = pcall(C_CombatText.SetActiveUnit, "player")
-        Log("combat text unit: none, set to player (%s)", set and "ok" or "failed")
-    end
-end
-
-function FFT:CombatTextState()
-    local unit
-    if C_CombatText and C_CombatText.GetActiveUnit then
-        local ok, u = pcall(C_CombatText.GetActiveUnit)
-        unit = ok and u or nil
-    end
-    return ("%s %s, energy gains %s / periodic %s, Blizzard frame %s, unit %s"):format(SELF_CVAR,
-        S(C_CVar.GetCVar(SELF_CVAR)), S(C_CVar.GetCVar("floatingCombatTextEnergyGains_v2")),
-        S(C_CVar.GetCVar("floatingCombatTextPeriodicEnergyGains_v2")),
-        type(_G.CombatText) ~= "table" and "not loaded" or (_G.CombatText:IsShown() and "shown" or "hidden"),
-        S(unit))
-end
-
--- Sets the ones we replace (saving the game's value first); puts back the rest
-function FFT:ApplyBlizzardText()
-    if InCombatLockdown() then blizzardPending = true; return end
-    blizzardPending = false
-    local saved = db.savedCVars or {}
-    db.savedCVars = saved -- BlizzardSelfTextHidden reads the saved value
-    local seen = {}
-    for _, cvar in ipairs(BLIZZARD_CVARS) do
-        seen[cvar] = true
-        local value = C_CVar.GetCVar(cvar)
-        if value ~= nil and not IsSecret(value) then
-            local want = CVarTarget(cvar)
-            if want then
-                if saved[cvar] == nil then saved[cvar] = value end
-                if value ~= want then C_CVar.SetCVar(cvar, want) end
-            elseif saved[cvar] ~= nil then
-                C_CVar.SetCVar(cvar, saved[cvar])
-                saved[cvar] = nil
-            end
-        end
-    end
-    -- values saved by an older version for settings no longer hidden
-    for cvar, value in pairs(saved) do
-        if not seen[cvar] then C_CVar.SetCVar(cvar, value); saved[cvar] = nil end
-    end
-    db.savedCVars = next(saved) and saved or nil
-    self:ApplyBlizzardCombatTextFrame()
-    self:EnsureCombatTextUnit()
-    Log("combat text settings applied: %s", self:CombatTextState())
-    self:LogCombatTextCVars()
-end
-
--- (1.27.1) At every logout (and /reload) Blizzard's settings go back to the player's own values,
--- and ApplyBlizzardText sets them again at the next login. So a player who disables or deletes
--- the addon has their own floating text back: the game saves settings after PLAYER_LOGOUT, and the
--- addon never runs again to undo them otherwise.
--- The saved values are kept: the next login's ApplyBlizzardText finds them already there.
--- Also in combat (a /reload mid-fight): these CVars aren't secure, and each set is guarded.
-function FFT:RestoreBlizzardTextForLogout()
-    for cvar, value in pairs(db.savedCVars or {}) do
-        local ok, now = pcall(C_CVar.GetCVar, cvar)
-        if ok and now ~= nil and not IsSecret(now) and now ~= value then pcall(C_CVar.SetCVar, cvar, value) end
-    end
-end
-
--- (1.24.1, probe) Blizzard's per-kind settings for its text over you (CombatTextConstants.lua
--- `cvar`). The energy kinds came only with their CVar on, so the feed may skip any kind whose CVar
--- is "0": the log says which were on. Kinds without a CVar (DAMAGE, HEAL, PERIODIC_HEAL,
--- SPLIT_DAMAGE, ABSORB_ADDED) have none to check. Read only; nothing is changed.
--- (1.26.2) Answered for two: buff and miss kinds came with Auras and DodgeParryMiss at "0"
--- (2026-11-09 08:04 log). Kept with the probe, since DamageReduction is "0" too and its kinds
--- (partial block / resist / absorb) aren't seen yet: if they never come, this says why to look.
-local KIND_CVARS = {
-    "floatingCombatTextAuras_v2", "floatingCombatTextDamageReduction_v2",
-    "floatingCombatTextDodgeParryMiss_v2", "floatingCombatTextFriendlyHealers_v2",
-    "floatingCombatTextReactives_v2", "floatingCombatTextRepChanges_v2",
-    "floatingCombatTextHonorGains_v2", "floatingCombatTextLowManaHealth_v2",
-    "floatingCombatTextComboPoints_v2",
-}
-function FFT:LogCombatTextCVars()
-    if not logging then return end
-    local parts = {}
-    for _, cvar in ipairs(KIND_CVARS) do
-        local ok, v = pcall(C_CVar.GetCVar, cvar)
-        parts[#parts + 1] = cvar:gsub("^floatingCombatText", ""):gsub("_v2$", "") .. " " .. (ok and S(v) or "?")
-    end
-    Log("combat text kinds' settings: %s", table.concat(parts, ", "))
-end
-
--- Settings "Reset" puts back to the game's own defaults: the four above, plus the
--- other world text settings from the same list that came up while testing.
--- All are in Forever's CVar list as not secure, so addons may set them.
-local RESET_CVARS = {
-    "floatingCombatTextCombatDamage_v2",
-    "floatingCombatTextCombatLogPeriodicSpells_v2",
-    "floatingCombatTextPetMeleeDamage_v2",
-    "floatingCombatTextPetSpellDamage_v2",
-    HEAL_CVAR,
-    "floatingCombatTextSpellMechanics_v2",           -- "values for effects on other players"
-    "floatingCombatTextSpellMechanicsOther_v2",      -- "... on other players' targets"
-    "threatWorldText",                               -- "threat floaters in combat"
-    SELF_CVAR,
-}
-
--- Resets to the defaults the client reports (C_CVar.GetCVarDefault), then hides
--- Blizzard's damage numbers again if that option is on.
-function FFT:ResetBlizzardCVars()
-    if InCombatLockdown() then
-        Print("can't change game settings during a fight; try again after it.")
-        return
-    end
-    local before = {}
-    for _, cvar in ipairs(RESET_CVARS) do
-        local default = C_CVar.GetCVarDefault(cvar)
-        local value = C_CVar.GetCVar(cvar)
-        before[cvar] = value
-        if default ~= nil and value ~= nil and value ~= default then
-            C_CVar.SetCVar(cvar, default)
-        end
-    end
-    db.savedCVars = nil
-    self:ApplyBlizzardText()
-    -- report only what ended up different (the hidden damage numbers are hidden again)
-    local changed = {}
-    for _, cvar in ipairs(RESET_CVARS) do
-        local now = C_CVar.GetCVar(cvar)
-        if before[cvar] ~= nil and now ~= before[cvar] then
-            changed[#changed + 1] = ("%s %s -> %s"):format(cvar, before[cvar], now)
-        end
-    end
-    if #changed == 0 then
-        Print("game combat text settings were already at their defaults.")
-    else
-        Print("reset to game defaults:")
-        for _, line in ipairs(changed) do Print("  " .. line) end
-    end
-    if db.enabled and db.hideBlizzard then
-        Print("the ones this addon replaces stay hidden while their feature is on.")
-    end
-end
-
--- Your totems' hits are matched through their nameplates (OnMinionCast), so they need the CVar
--- nameplateShowFriendlyPlayerTotems = 1. The addon can't set it: Forever's CVar list marks it
--- secure, and C_CVar.SetCVar requires a non-secure CVar (CVarDocumentation: RequiresNonSecureCVar,
--- failing silently). A /console command typed by the player can. So at login, if it's off,
--- say so once. Only for characters with totem slots (GetNumTotemSlots), not a class check.
-function FFT:TotemPlatesReminder()
-    C_Timer.After(6, function() -- after the login chat spam, and after the Combat Log check at 5s
-        if not (db.enabled and db.showPet) then return end
-        -- the Combat Log tells your totems' hits by itself
-        if FFT:ClogActive() then return end
-        local slots = Plain(GetNumTotemSlots())
-        if not slots or slots < 1 then return end
-        if C_CVar.GetCVar("nameplateShowFriendlyPlayerTotems") == "1" then return end
-        Print("totem nameplates are off, so your totems' hits aren't shown. "
-            .. "To show them, type: /console nameplateShowFriendlyPlayerTotems 1")
-    end)
-end
-
--- (1.30.0) Enemy nameplates off (CVar nameplateShowEnemies; the game's own tutorial sets it,
--- Blizzard_Tutorial.lua): the game reports hits on your target only (FFT.TargetPseudo), so other
--- mobs' numbers can't show. A hunter's 2026-11-10 21:15 log: four fights with them off, nothing
--- shown and nothing said. Said once a session, at the first fight with them off.
-function FFT.EnemyPlatesNotice()
-    if FFT.platesNoticed then return end
-    local ok, value = pcall(C_CVar.GetCVar, "nameplateShowEnemies")
-    if not ok or value ~= "0" then return end
-    FFT.platesNoticed = true
-    Log("enemy nameplates are off: only your target's hits are reported")
-    Print("enemy nameplates are off, so only your current target's damage can show, at the damage "
-        .. "position (Damage options). Turn enemy nameplates on to see your damage on every enemy.")
-end
-
--- /fft cvars: which of these settings the game has, their values and defaults
-function FFT:ListCVars()
-    for _, cvar in ipairs(RESET_CVARS) do
-        local value = C_CVar.GetCVar(cvar)
-        if value == nil then
-            Print(cvar .. " = |cff888888(not in this client)|r")
-        else
-            Print(("%s = %s (default %s)"):format(cvar, S(value), S(C_CVar.GetCVarDefault(cvar))))
-        end
-    end
-end
-
-------------------------------------------------------------------------
 -- Test, status, debug
 ------------------------------------------------------------------------
 -- (1.30.0) a few numbers at the damage spot (Spots.lua), whichever placement is chosen
@@ -4065,8 +3947,8 @@ end
 local RESTRICTIONS = {"Combat", "Encounter", "ChallengeMode", "PvPMatch", "Map"}
 
 function FFT:Status()
-    Print(("enabled: %s, show numbers on: %s, in group: %s"):format(
-        tostring(db.enabled), db.scope, tostring(IsInGroup())))
+    Print(("version %s, enabled: %s, show numbers on: %s, in group: %s"):format(
+        FFT.Meta("Version") or "?", tostring(db.enabled), db.scope, tostring(IsInGroup())))
     Print("Combat Log: " .. self:ClogStatus())
     -- your totems' hits can only be matched when their nameplates exist (see OnMinionCast)
     local totemPlates = C_CVar.GetCVar("nameplateShowFriendlyPlayerTotems")
@@ -4091,7 +3973,7 @@ function FFT:Status()
     if db.showPower then
         Print("resource gains: " .. (FFT.PowerFeedText and FFT:PowerFeedText() or "?"))
     end
-    if FeedWanted() then Print("combat text feed: " .. self:CombatTextState()) end
+    if FFT.FeedWanted() then Print("combat text feed: " .. self:CombatTextState()) end
 end
 
 function FFT:ToggleDebug()
@@ -4120,6 +4002,18 @@ function FFT:ResumeLog()
         StartSavedLog("recording resumed after reload")
         Print("still recording (/fft debug stops it).")
     end
+end
+
+-- (1.31.17) A recording that was stopped stays in the saved variables until /fft clearlog: the game
+-- loads it at every login and writes it at every logout (60,000 lines are several MB), the
+-- addon's largest use of memory by far. Said once at login while one is kept and none is running.
+function FFT:SavedLogReminder()
+    C_Timer.After(7, function()
+        local lines = ForeverFloatingTextLog and ForeverFloatingTextLog.lines
+        if logging or type(lines) ~= "table" or #lines == 0 then return end
+        Print(("a debug recording of %d lines is still saved, and loaded at every login. "
+            .. "/fft clearlog empties it."):format(#lines))
+    end)
 end
 
 function FFT:CopyLog()
@@ -4206,6 +4100,14 @@ events:SetScript("OnEvent", function(_, event, ...)
         local unit = ...
         if not IsSecret(unit) then FFT:OnMinionPlateRemoved(unit) end
         local plate = not IsSecret(unit) and PlateOf(unit)
+        if plate and db and logging then -- (1.31.22) to learn why the handover below didn't happen (FFT.Adopt)
+            local mine = false
+            for _, sw in ipairs(swings) do if sw.plate == plate then mine = true end end
+            if mine or FFT.IsTarget(unit) then
+                Log("%s's nameplate goes: your target %s, a target key %s", unit, tostring(FFT.IsTarget(unit)),
+                    tostring(FFT.TargetPseudo() ~= nil))
+            end
+        end
         if plate and db and FFT.IsTarget(unit) then FFT.Rekey(plate, FFT.TargetPseudo()) end -- (1.30.0)
         if plate then
             DetachPlate(plate)
@@ -4272,9 +4174,18 @@ events:SetScript("OnEvent", function(_, event, ...)
             FFT:ApplyBlizzardCombatTextFrame()
         end
     elseif event == "PLAYER_LOGIN" then
+        if FFT.ApplyBlizzardText == FFT.NotLoaded or FFT.WriteOwnClogFilter == FFT.NotLoaded then
+            C_Timer.After(6, function()
+                Print("this version has new files, and the game loads new files only when it starts: "
+                    .. "close the game and start it again (a /reload isn't enough). Until then the game's own "
+                    .. "numbers aren't hidden and the Combat Log filter isn't kept up.")
+            end)
+        end
         FFT:ApplyBlizzardText()
         FFT:CleanLearned()
         FFT:TotemPlatesReminder()
+        FFT:SavedLogReminder()
+        FFT:SetupReminder()
         -- Blizzard_CombatLog (and its saved filters) may load a little after login
         FFT:ClogStart()
         C_Timer.After(5, function() FFT:ClogStart() end)
@@ -4301,9 +4212,13 @@ events:SetScript("OnEvent", function(_, event, ...)
     elseif event == "UNIT_SPELLCAST_INTERRUPTED" then
         if db then FFT:OnInterrupted(...) end
     elseif event == "PLAYER_REGEN_ENABLED" then
-        if blizzardPending then FFT:ApplyBlizzardText() end
+        if FFT.blizzardPending then FFT:ApplyBlizzardText() end
         if db and FFT.OnCombatState then FFT:OnCombatState(false) end
     elseif event == "PLAYER_TARGET_CHANGED" then
+        -- (1.31.18) what was cast at the last target under its key goes with it: it stayed for good,
+        -- a little more with every target that had no nameplate
+        if FFT.targetKey then FFT:ForgetPlateDots(FFT.targetKey) end
+        FFT.targetEpoch = FFT.targetEpoch + 1 -- (1.31.22) another target from here on (FFT.Adopt)
         FFT.targetKey = nil -- (1.30.0) a new key for the new target (FFT.TargetPseudo)
     elseif event == "PLAYER_REGEN_DISABLED" then
         if db and FFT.OnCombatState then FFT:OnCombatState(true) end
@@ -4314,6 +4229,8 @@ events:SetScript("OnEvent", function(_, event, ...)
             -- why not, when not (the 20:05 log only said "not in use", with no line of yours at all)
             Log("fight starts; Combat Log: %s%s", FFT:ClogStatus(),
                 FFT:ClogActive() and "" or ("; " .. FFT:ClogStateText()))
+            -- (1.31.16) what the game gives for the main-hand weapon in a fight (SWING_QUICK.Weapon)
+            if logging then Log("main-hand item: %s", tostring(SWING_QUICK.MainHand())) end
             FFT.probe.lines = math.min(FFT.probe.lines, 3) -- (1.31.14) two more lines' text, each fight
         end
     elseif event == "COMBAT_LOG_MESSAGE" then
@@ -4357,7 +4274,7 @@ SlashCmdList.FOREVERFLOATINGTEXT = function(msg)
         FFT:HealStatus()
     elseif msg == "forget" then
         FFT:ForgetHots()
-        db.swingAnims = nil -- (1.29.0) the swing delays learned per weapon
+        db.swingAnims, db.swingAnimsBy = nil, nil -- (1.29.0) the swing delays learned per weapon
         Print("forgot the swing delays learned per weapon")
     elseif msg == "copy" then
         FFT:CopyLog()

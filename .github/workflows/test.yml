@@ -18,7 +18,7 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq lua5.1 lua5.3
 
       - name: The addon compiles for the game
-        run: luac5.1 -p Core.lua Spots.lua Heals.lua Incoming.lua Alerts.lua Procs.lua Loot.lua Notices.lua Options.lua
+        run: luac5.1 -p Core.lua Filter.lua GameSettings.lua Spots.lua Heals.lua Incoming.lua Alerts.lua Procs.lua Loot.lua Notices.lua Options.lua
 
       - name: Test suite (exact checks, sim/tests.lua)
         run: lua5.3 sim/tests.lua

@@ -46,7 +46,7 @@ function GetShapeshiftFormID() return form end
 -- the player's own settings, saved with the log (misses on or off change what lines are used up)
 ForeverFloatingTextDB = env.ForeverFloatingTextDB or env.OwnCombatTextDB or {}
 local ns = {}
-for _, n in ipairs({"Core_lua", "Spots_lua", "Heals_lua", "Incoming_lua", "Alerts_lua", "Procs_lua"}) do
+for _, n in ipairs({"Core_lua", "Filter_lua", "GameSettings_lua", "Spots_lua", "Heals_lua", "Incoming_lua", "Alerts_lua", "Procs_lua"}) do
     assert(load(_G["SRC_" .. n], "@" .. n))("ForeverFloatingText", ns)
 end
 local FFT = ns.FFT

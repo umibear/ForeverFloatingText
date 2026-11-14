@@ -175,6 +175,36 @@ local function Learned(cast, create)
     return db.auraCasts and db.auraCasts[key]
 end
 
+-- (1.31.16) What a cast removes was learned from one sighting of any buff of yours going within
+-- 0.15 s of the cast, so a buff that merely ran out then was "removed" by it for good: the author's
+-- saved list had Skinning and Healing Wave removing Flurry and Improved Stormstrike, Ghost Wolf
+-- removing a paladin's aura and five more (2026-11-14), and each showed a false "fades" in a fight.
+-- Now only a buff that a cast of yours was learned to add (`gives`: the ones the combat text feed
+-- doesn't bring, your totems' mostly; the feed says the others' fades itself), and only once it
+-- was seen REMOVE_SEEN times. Saved entries from before are cleaned once a session: other buffs
+-- dropped, the rest counted as seen once.
+local REMOVE_SEEN = 2
+local given -- buff name -> true: buffs some cast of yours was learned to add
+local function Given()
+    if given then return given end
+    given = {}
+    Learned({name = ""}) -- old entries by spell ID move to their name first (ConvertByName)
+    local saved = FFT.db and FFT.db.auraCasts
+    for _, l in pairs(saved or {}) do
+        if type(l) == "table" and type(l.gives) == "string" then given[l.gives] = true end
+    end
+    for _, l in pairs(saved or {}) do
+        if type(l) == "table" and type(l.removes) == "table" then
+            for name, seen in pairs(l.removes) do
+                if not given[name] then l.removes[name] = nil
+                elseif type(seen) ~= "number" then l.removes[name] = 1 end
+            end
+        end
+    end
+    return given
+end
+local function Removes(seen) return type(seen) == "number" and seen >= REMOVE_SEEN end
+
 -- the one cast in the frame that the buff belongs to
 local function CastFor(casts, buff)
     if #casts == 1 then return casts[1] end
@@ -274,6 +304,7 @@ local function ShowAuraChanges(t, added, removed, full, hiddenAdd, hiddenRemove)
                     if l and totem and not l.totem then l.totem = true end
                     if l and l.gives ~= name then
                         l.gives = name
+                        Given()[name] = true
                         Log("  learned: %s (spell %s) adds <%s>", ns.S(c.name), ns.S(c.id), name)
                     end
                 end
@@ -285,11 +316,13 @@ local function ShowAuraChanges(t, added, removed, full, hiddenAdd, hiddenRemove)
         local name = auraNames[id]
         auraNames[id] = nil
         if name ~= nil then
-            if type(name) == "string" and #casts == 1 then
+            if type(name) == "string" and #casts == 1 and Given()[name] then
                 local l = Learned(casts[1], true)
-                if l and not l.removes[name] then
-                    l.removes[name] = true
-                    Log("  learned: %s (spell %s) removes <%s>", ns.S(casts[1].name), ns.S(casts[1].id), name)
+                local seen = l and (type(l.removes[name]) == "number" and l.removes[name] or 0)
+                if l and seen < REMOVE_SEEN then
+                    l.removes[name] = seen + 1
+                    Log("  %s (spell %s) seen removing <%s> %d of %d times%s", ns.S(casts[1].name), ns.S(casts[1].id),
+                        name, seen + 1, REMOVE_SEEN, seen + 1 >= REMOVE_SEEN and ": learned" or "")
                 end
             end
             if feedRemoved then
@@ -314,8 +347,9 @@ local function ShowAuraChanges(t, added, removed, full, hiddenAdd, hiddenRemove)
             local l = Learned(c)
             if not c.usedRemove and l and l.removes then
                 c.usedRemove = true
-                for name in pairs(l.removes) do
-                    if upNames[name] then ShowFaded(name, "hidden, learned for " .. ns.S(c.name)) end
+                Given() -- (1.31.16) entries saved before are cleaned first
+                for name, seen in pairs(l.removes) do
+                    if upNames[name] and Removes(seen) then ShowFaded(name, "hidden, learned for " .. ns.S(c.name)) end
                 end
             end
         end
@@ -528,56 +562,56 @@ end
 local stormstrikeID          -- learned from your own cast, else the name is used
 local lastStormstrike = -100 -- when you last cast it
 local alertedFor             -- the Stormstrike whose reset was shown
-local recheckFor             -- the Stormstrike being looked at again until a late GCD ends
 local lastActive             -- its isActive as last logged
 local inFight = InCombatLockdown and InCombatLockdown() or false -- then PLAYER_REGEN_DISABLED / _ENABLED
 
 local function Logging() return ns.IsLogging and ns.IsLogging() end
 
--- ready: true (off cooldown, or only the global one), false (on its cooldown), nil (can't tell)
-local function StormstrikeCooldown()
+-- ready: true (off cooldown, or only the global one), false (on its cooldown), nil (can't tell);
+-- then what the game gave (CooldownText puts it into words) and its isActive.
+-- (1.31.17) The words are made only where they are logged: this is read 20 times a second while
+-- Stormstrike is on its cooldown, and each read built a line of text that was thrown away. And the
+-- two polls below (the reset's and the cooldown's length) share one read when they fall in one
+-- moment (poll = true); a read for an event is always a new one.
+local function CooldownText(info)
+    if type(info) ~= "table" then return tostring(info) end
+    return ("active %s, gcd %s, start %s, duration %s"):format(ns.S(info.isActive), ns.S(info.isOnGCD),
+        ns.S(info.startTime), ns.S(info.duration))
+end
+local lastRead = {at = -1}
+local function StormstrikeCooldown(poll)
+    local now = GetTime()
+    if poll and lastRead.at == now then return lastRead.ready, lastRead.info, lastRead.active end
     if not (C_Spell and C_Spell.GetSpellCooldown) then return nil, "no C_Spell.GetSpellCooldown" end
     local ok, info = pcall(C_Spell.GetSpellCooldown, stormstrikeID or STORMSTRIKE)
     if not ok then return nil, "GetSpellCooldown failed" end
     if type(info) ~= "table" or ns.IsSecret(info) then return nil, "no cooldown info (" .. ns.S(info) .. ")" end
-    local text = ("active %s, gcd %s, start %s, duration %s"):format(ns.S(info.isActive), ns.S(info.isOnGCD),
-        ns.S(info.startTime), ns.S(info.duration))
     local active, gcd = Plain(info.isActive), Plain(info.isOnGCD)
     local ready
     if active == false then ready = true
     elseif active == true then ready = (gcd == true) end
-    return ready, text, active
+    lastRead.at, lastRead.ready, lastRead.info, lastRead.active = now, ready, info, active
+    return ready, info, active
 end
 
 local function ProbeCooldown(why)
     if not Logging() then return end
-    local _, text, active = StormstrikeCooldown()
-    Log("Stormstrike cooldown (%s): %s", why, text)
+    local _, info, active = StormstrikeCooldown()
+    Log("Stormstrike cooldown (%s): %s", why, CooldownText(info))
     if active ~= nil then lastActive = active end
 end
 
-local function CheckReset(why)
+-- poll: called by the look every 0.1 s (shares its read with the other poll)
+local function CheckReset(why, poll)
     local since = GetTime() - lastStormstrike
     if since < SS_RESET_AFTER or since > SS.Before() or alertedFor == lastStormstrike then return end
-    local ready, text, active = StormstrikeCooldown()
-    if ready and active == true and since >= SS.GcdSure() then
-        -- only the GCD shows, but it may just outlast the cooldown's last 1.5 s: look again after it
-        if recheckFor ~= lastStormstrike then
-            recheckFor = lastStormstrike
-            local cast = lastStormstrike
-            local function Again()
-                if lastStormstrike ~= cast or alertedFor == cast then return end
-                if GetTime() - cast > SS.Before() then return end
-                CheckReset("after the GCD")
-                C_Timer.After(0.1, Again)
-            end
-            C_Timer.After(0.1, Again)
-        end
-        return
-    end
+    local ready, info, active = StormstrikeCooldown(poll)
+    -- only the GCD shows, but it may just outlast the cooldown's last 1.5 s: the look every 0.1 s
+    -- (below) sees it again after that GCD. (1.31.17: it started a second such look of its own.)
+    if ready and active == true and since >= SS.GcdSure() then return end
     if not ready then return end
     alertedFor = lastStormstrike
-    Log("Stormstrike reset: ready %.2f s after you cast it (%s; %s)", since, why, text)
+    Log("Stormstrike reset: ready %.2f s after you cast it (%s; %s)", since, why, CooldownText(info))
     local db = FFT.db
     -- (1.31.0) at the procs spot, kept there until you cast Stormstrike or leave combat (Procs.lua);
     -- before, a scrolling alert. Its own setting only: no longer under "Show ability alerts".
@@ -589,19 +623,10 @@ local function CheckReset(why)
         nil, nil, 10) -- 10 s if unused
 end
 
--- a mob avoiding your attack: look again a moment later (cheap; the cooldown update is what counts)
-local avoided = CreateFrame("Frame")
-avoided:RegisterEvent("UNIT_COMBAT")
-avoided:SetScript("OnEvent", function(_, _, unit, action)
-    -- (1.28.8) only while a Stormstrike of yours is on cooldown: before, every miss, dodge or parry
-    -- on any nameplate started a timer, for every class
-    if GetTime() - lastStormstrike > SS.Before() then return end
-    if ns.IsSecret(unit) or type(unit) ~= "string" or not unit:find("^nameplate") then return end
-    action = Plain(action)
-    if action == "DODGE" or action == "PARRY" or action == "MISS" then
-        C_Timer.After(0.1, function() CheckReset("a mob's " .. action:lower()) end)
-    end
-end)
+-- (1.31.17) No listener for mobs avoiding your attacks any more. It heard every hit on every
+-- nameplate while Stormstrike was on its cooldown, to look again after a mob's dodge, parry or
+-- miss: the idea of 1.28.0, before the logs showed the reset comes with your own dodge or parry.
+-- And since 1.31.2 the cooldown is looked at every 0.1 s anyway.
 
 -- (1.31.11) your dodge, parry or block in the combat text feed (at the real moment: Incoming.lua):
 -- a Stormstrike cooldown reading near it may be a reset, not its length (SS above)
@@ -623,7 +648,7 @@ probe:RegisterEvent("PLAYER_LOGIN")
 probe:RegisterEvent("SPELLS_CHANGED")
 
 -- (1.31.3) Only a character that knows Stormstrike (an Enhancement talent) listens for its resets:
--- every nameplate's dodges and parries, every cooldown update, your own dodges. Asked with
+-- every cooldown update, your own dodges, parries and blocks (UNIT_COMBAT and the feed). Asked with
 -- C_SpellBook.IsSpellKnown (SpellBookDocumentation.lua, Forever's API list; IsPlayerSpell isn't in
 -- it) at login and when your spells change (SPELLS_CHANGED: talents, respec). 17364 is the spell
 -- in the author's logs ("Stormstrike cooldown (update, spell 17364)" with each cast). Can't tell,
@@ -634,11 +659,11 @@ local function Watch(on)
     if on == watching then return end
     watching = on
     if on then
-        avoided:RegisterEvent("UNIT_COMBAT")
+        avoidFeed:RegisterEvent("COMBAT_TEXT_UPDATE")
         probe:RegisterEvent("SPELL_UPDATE_COOLDOWN")
         probe:RegisterUnitEvent("UNIT_COMBAT", "player")
     else
-        avoided:UnregisterEvent("UNIT_COMBAT")
+        avoidFeed:UnregisterEvent("COMBAT_TEXT_UPDATE")
         probe:UnregisterEvent("SPELL_UPDATE_COOLDOWN")
         probe:UnregisterEvent("UNIT_COMBAT")
     end
@@ -668,7 +693,7 @@ probe:SetScript("OnEvent", function(_, event, a1, a2, a3)
             local function Look()
                 if lastStormstrike ~= cast or alertedFor == cast then return end
                 if GetTime() - cast > SS.Before() then return end
-                CheckReset("looked again")
+                CheckReset("looked again", true)
                 C_Timer.After(0.1, Look)
             end
             C_Timer.After(SS_RESET_AFTER, Look)
@@ -678,7 +703,7 @@ probe:SetScript("OnEvent", function(_, event, a1, a2, a3)
                 if lastStormstrike ~= cast then return end
                 local took = GetTime() - cast
                 if took > 30 then return end
-                local ready, _, active = StormstrikeCooldown()
+                local ready, _, active = StormstrikeCooldown(true)
                 if active == false then
                     if before == "own" then
                         C_Timer.After(SS.CLEAN_AFTER, function()
@@ -698,9 +723,9 @@ probe:SetScript("OnEvent", function(_, event, a1, a2, a3)
     if event == "SPELL_UPDATE_COOLDOWN" then
         CheckReset("cooldown update")
         if Logging() then
-            local _, text, active = StormstrikeCooldown()
+            local _, info, active = StormstrikeCooldown()
             if active ~= nil and active ~= lastActive then
-                Log("Stormstrike cooldown (update, spell %s): %s", ns.S(a1), text)
+                Log("Stormstrike cooldown (update, spell %s): %s", ns.S(a1), CooldownText(info))
                 lastActive = active
             end
         end

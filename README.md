@@ -41,23 +41,23 @@ the addon. Only the Combat Log stays on the addon's filter: pick another on its 
    "Code" button: its folder name won't load in the game).
 2. Unzip it into `World of Warcraft\_forever_\Interface\AddOns\`, so you get
    `AddOns\ForeverFloatingText\ForeverFloatingText.toc`.
-3. Start the game and type `/reload` once. The addon sets up its own Combat Log filter on
-   reload or logout.
+3. Start the game and type `/reload` once (the addon says so in chat until it is done). It sets
+   up its own Combat Log filter on reload or logout.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `/fft` | Options |
+| `/fft` | Options; their About page says the version and where new ones are |
 | `/fft test` | Sample numbers at every position |
 | `/fft move` | Show the six fixed positions (damage and healing, incoming and resources, alerts, buffs, procs, loot and gains) to drag them; also the Move frames button on the options' General page |
 | `/fft lock` | Lock them all again (or click Lock all, or right-click any box) |
 | `/fft hide <buff>`, `/fft unhide <buff>` | Leave a buff out of the buffs position, or bring it back; `/fft hide` lists them |
 | `/fft on`, `/fft off` | Turn the addon on or off |
-| `/fft status` | What the addon is using right now |
+| `/fft status` | The version, and what the addon is using right now |
 | `/fft clog` | Combat Log state; turns its messages back on |
 | `/fft heals` | Learned heal-over-time and damage-over-time rhythms |
-| `/fft forget` | Forget the learned rhythms and swing delays |
+| `/fft forget` | Forget everything learned: heal and damage rhythms, spell schools, each weapon's swing delays |
 | `/fft cvars` | Blizzard's combat text settings and their defaults |
 | `/fft reset` | Put Blizzard's combat text settings back to their defaults |
 | `/fft debug` | Start or stop recording a debug log |

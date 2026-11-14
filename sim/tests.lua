@@ -13,7 +13,7 @@ local READ = READ_FILE or function(path)
 end
 local PRINT = print -- the fake game's print keeps the addon's chat messages instead
 local ADDON = "ForeverFloatingText"
-local FILES = {"Core.lua", "Spots.lua", "Heals.lua", "Incoming.lua", "Alerts.lua", "Procs.lua", "Loot.lua", "Notices.lua"}
+local FILES = {"Core.lua", "Filter.lua", "GameSettings.lua", "Spots.lua", "Heals.lua", "Incoming.lua", "Alerts.lua", "Procs.lua", "Loot.lua", "Notices.lua"}
 
 ------------------------------------------------------------------------
 -- A fresh game for each test
@@ -30,6 +30,7 @@ local function NewGame(opt)
     MANA, AURA_END = "Mana", "<%s> fades"
     GetFramerate = nil -- a test at another frame rate sets it (and SIM.FRAME) after NewGame
     UnitClass = nil -- not in the stub: no class; a test sets it after NewGame (Shaman())
+    GetInventoryItemID = nil -- not in the stub: no weapon known; a test sets it after NewGame
     function UnitPowerType() return 0, "MANA" end
     local feed = {n = 0}
     C_CombatText = {
@@ -49,7 +50,10 @@ local function NewGame(opt)
     ForeverFloatingTextDB = opt.db or {}
     ForeverFloatingTextLog = nil
     local ns = {}
-    for _, name in ipairs(FILES) do assert(load(READ(name), "@" .. name))(ADDON, ns) end
+    for _, name in ipairs(FILES) do
+        -- opt.without: files left out, as after an update with the game running (new files load only at its start)
+        if not (opt.without and opt.without[name]) then assert(load(READ(name), "@" .. name))(ADDON, ns) end
+    end
     local FFT = ns.FFT
     local g = {ns = ns, FFT = FFT, shown = {}, castN = 0, procs = {}}
     local realShow = FFT.Show
@@ -158,7 +162,7 @@ Test("the .toc lists the files the game loads, in order", function()
     for line in toc:gmatch("[^\r\n]+") do
         if not line:find("^#") and line:find("%S") then files[#files + 1] = line:match("^%s*(.-)%s*$") end
     end
-    Eq(table.concat(files, " "), "Core.lua Spots.lua Heals.lua Incoming.lua Alerts.lua Procs.lua Loot.lua Notices.lua Options.lua", "files")
+    Eq(table.concat(files, " "), "Core.lua Filter.lua GameSettings.lua Spots.lua Heals.lua Incoming.lua Alerts.lua Procs.lua Loot.lua Notices.lua Options.lua", "files")
     Eq(toc:match("## Interface: (%d+)"), "16001", "made for WoW: Forever")
     Ok(toc:find("## SavedVariables: ForeverFloatingTextDB, ForeverFloatingTextLog", 1, true), "saved variables")
     Ok(toc:match("## Version: (%d+%.%d+%.%d+)"), "a version")
@@ -483,17 +487,55 @@ Test("in combat (all hidden), a totem's buff and its recall show what was learne
     NewGame()
     AllAuras() -- (1.31.0) fades and totem buffs are off by default
     TotemSpells()
+    -- (1.31.16) what a cast removes counts once seen twice
     At(1, function() Cast(8160); SIM.Fire("UNIT_AURA", "player", {addedAuras = {TotemAura("Strength of Earth", 70)}}) end)
-    At(3, function() Cast(36936); SIM.Fire("UNIT_AURA", "player", {removedAuraInstanceIDs = {70}}) end)
+    At(2, function() Cast(36936); SIM.Fire("UNIT_AURA", "player", {removedAuraInstanceIDs = {70}}) end)
+    At(3, function() Cast(8160); SIM.Fire("UNIT_AURA", "player", {addedAuras = {TotemAura("Strength of Earth", 71)}}) end)
+    At(4, function() Cast(36936); SIM.Fire("UNIT_AURA", "player", {removedAuraInstanceIDs = {71}}) end)
     At(5, function() Cast(8160); HiddenAdd() end)
     At(7, function() Cast(36936); HiddenRemove() end)
     At(8, function() Cast(36936); HiddenRemove() end) -- nothing up any more
     Run(9)
     local t = AuraTexts()
-    Eq(#t, 4, "gained and faded, twice")
-    Eq(t[3], "<Strength of Earth>", "in combat, gained")
-    Eq(t[4], "<Strength of Earth> fades", "in combat, faded")
+    Eq(#t, 6, "gained and faded, three times")
+    Eq(t[5], "<Strength of Earth>", "in combat, gained")
+    Eq(t[6], "<Strength of Earth> fades", "in combat, faded")
     Ok(ForeverFloatingTextDB.auraCasts["Strength of Earth Totem"].gives == "Strength of Earth", "kept in the saved variables")
+    Eq(ForeverFloatingTextDB.auraCasts["Totemic Recall"].removes["Strength of Earth"], 2, "the recall seen removing it twice")
+end)
+
+-- (1.31.16) The author's saved list, 2026-11-14: Skinning "removing" Flurry and Improved Stormstrike,
+-- Ghost Wolf a paladin's aura: buffs that ran out within 0.15 s of the cast, each learned from that
+-- one moment and then told as faded in a fight. Only a buff one of your casts adds, seen twice.
+Test("a buff that only ran out as you cast isn't learned as removed by the cast", function()
+    NewGame({db = {auraCasts = {
+        Skinning = {removes = {Flurry = true, ["Strength of Earth"] = true}},
+        ["Strength of Earth Totem"] = {gives = "Strength of Earth", removes = {}, totem = true},
+    }}})
+    AllAuras()
+    TotemSpells()
+    SIM.spells[8613] = {name = "Skinning"}
+    SIM.spells[2645] = {name = "Ghost Wolf"}
+    local function Mine(name, id) return TotemAura(name, id, {duration = 15, sourceUnit = "player"}) end
+    -- out of combat: Flurry runs out as you cast Ghost Wolf; your totem's buff goes once with it too
+    At(1, function() SIM.Fire("UNIT_AURA", "player", {addedAuras = {Mine("Flurry", 90)}}) end)
+    At(2, function() Cast(8160); SIM.Fire("UNIT_AURA", "player", {addedAuras = {TotemAura("Strength of Earth", 91)}}) end)
+    At(3, function() Cast(2645); SIM.Fire("UNIT_AURA", "player", {removedAuraInstanceIDs = {90, 91}}) end)
+    Run(4)
+    local saved = ForeverFloatingTextDB.auraCasts
+    Ok(not (saved["Ghost Wolf"] and saved["Ghost Wolf"].removes.Flurry), "Flurry isn't a buff a cast of yours adds: not learned")
+    Eq(saved["Ghost Wolf"].removes["Strength of Earth"], 1, "the totem's buff: seen once, not yet counted")
+    -- in a fight: buffs back up, a hidden removal as you cast Ghost Wolf, then Skinning
+    At(5, function() Cast(8160); SIM.Fire("UNIT_AURA", "player", {addedAuras = {TotemAura("Strength of Earth", 92)}}) end)
+    At(5.5, function() SIM.Fire("UNIT_AURA", "player", {addedAuras = {Mine("Flurry", 93)}}) end)
+    Run(6)
+    local before = #AuraTexts()
+    At(7, function() Cast(2645); HiddenRemove() end)
+    At(8, function() Cast(8613); HiddenRemove() end)
+    Run(9)
+    Eq(#AuraTexts(), before, "no fade told for one sighting, nor for entries saved before")
+    Eq(saved.Skinning.removes.Flurry, nil, "the saved entry for a buff no cast adds is dropped")
+    Eq(saved.Skinning.removes["Strength of Earth"], 1, "one for a buff a cast adds counts as seen once")
 end)
 
 -- (1.31.4) each rank has a spell ID of its own (the author's game files: Searing Totem 3606,
@@ -2494,14 +2536,18 @@ Test("without Stormstrike its resets aren't watched; learning it, or casting it,
     NewGame()
     local known = false
     C_SpellBook = {IsSpellKnown = function(id) return id == 17364 and known end}
-    local cd, combat = Listening("SPELL_UPDATE_COOLDOWN"), Listening("UNIT_COMBAT")
+    local cd, combat, feed = Listening("SPELL_UPDATE_COOLDOWN"), Listening("UNIT_COMBAT"), Listening("COMBAT_TEXT_UPDATE")
     SIM.Fire("SPELLS_CHANGED")
     Eq(Listening("SPELL_UPDATE_COOLDOWN"), cd - 1, "no cooldown updates for it")
-    Eq(Listening("UNIT_COMBAT"), combat - 2, "no dodges and parries for it")
+    -- (1.31.17) one listener fewer to begin with: mobs' dodges and parries are no longer heard at all
+    Eq(Listening("UNIT_COMBAT"), combat - 1, "no dodges and parries of yours for it")
+    Eq(Listening("COMBAT_TEXT_UPDATE"), feed - 1, "nor the feed's")
+    Eq(combat, 2, "UNIT_COMBAT is heard by the matching and by this watch only")
     known = true
     SIM.Fire("SPELLS_CHANGED") -- a talent learned
     Eq(Listening("SPELL_UPDATE_COOLDOWN"), cd, "watched again")
     Eq(Listening("UNIT_COMBAT"), combat, "watched again")
+    Eq(Listening("COMBAT_TEXT_UPDATE"), feed, "watched again")
     known = false
     SIM.Fire("SPELLS_CHANGED")
     At(1, function() Cast(17364); G.SetCooldown(true) end) -- the game said no, but you cast it
@@ -2599,7 +2645,7 @@ end)
 Test("a tick in a spell's cast frame doesn't land the spell: its own hit is yours, its line no Windfury proc", function()
     NewGame()
     SIM.spells[403] = {name = "Lightning Bolt", harmful = true}
-    ForeverFloatingTextDB.spellSchools = {["Lightning Bolt"] = 8}
+    ForeverFloatingTextDB.spellSchools = {["Lightning Bolt"] = 8, ["Flame Shock"] = 4} -- (1.31.23) the tick's school is one you deal
     At(1, function() Cast(403); Line("SPELL_PERIODIC_DAMAGE"); Hit(nil, 4) end) -- the cast, and a tick's line and hit
     At(1.15, function() Line("SPELL_DAMAGE") end) -- the bolt's line
     At(1.2, function() Hit(nil, 8) end)           -- and its hit, 0.05 s later
@@ -2699,6 +2745,613 @@ Test("the probe logs what a line's text is, at a recording's start and each figh
     At(5, function() Line("SPELL_DAMAGE") end)
     Run(6)
     Eq(#ForeverFloatingTextLog.lines, before, "nothing logged when not recording")
+end)
+
+------------------------------------------------------------------------
+-- (1.31.16) Spell schools from the Combat Log, the weapon's own delays, numbers with no plate left
+------------------------------------------------------------------------
+local function SchoolVotes()
+    local n = 0
+    for _, l in ipairs(ForeverFloatingTextLog.lines) do if l:find("vote for school", 1, true) then n = n + 1 end end
+    return n
+end
+
+-- The author's saved schools held one spell after two weeks: only the ways used without the
+-- Combat Log taught them.
+Test("an instant spell's school is learned from its hit and line in its cast's frame, seen three times", function()
+    NewGame() -- in a group
+    for i = 0, 1 do
+        At(1 + 3 * i, function() Cast(8042); Line("SPELL_DAMAGE"); Hit("nameplate1", 8) end)
+    end
+    Run(6)
+    Eq(SchoolVotes(), 2, "two votes")
+    Ok(not (ForeverFloatingTextDB.spellSchools and ForeverFloatingTextDB.spellSchools["Earth Shock"]), "not learned from two")
+    At(7, function() Cast(8042); Line("SPELL_DAMAGE"); Hit("nameplate1", 8) end)
+    Run(9)
+    Eq(ForeverFloatingTextDB.spellSchools["Earth Shock"], 8, "learned from three")
+    At(10, function() Cast(8042); Line("SPELL_DAMAGE"); Hit("nameplate1", 8) end)
+    Run(12)
+    Eq(SchoolVotes(), 3, "no more votes once learned")
+    Eq(#Decisions("show"), 4, "all four shown")
+end)
+
+Test("no school is learned from a moment that can be something else's", function()
+    NewGame()
+    -- two hits in the cast's frame; a hit on another mob; a hit in a swing's frame (its proc's);
+    -- a tick's line; a miss
+    At(1, function() Cast(8042); Line("SPELL_DAMAGE"); Line("SPELL_DAMAGE"); Hit("nameplate1", 8); Hit("nameplate1", 4) end)
+    At(4, function() Cast(8042); Line("SPELL_DAMAGE"); Hit("nameplate2", 8) end)
+    At(7, function() Swing(); Cast(8042); Line("SPELL_DAMAGE"); Hit("nameplate1", 8) end)
+    At(10, function() Cast(8042); Line("SPELL_PERIODIC_DAMAGE"); Hit("nameplate1", 8) end)
+    At(13, function() Cast(8042) end)
+    Run(16)
+    Eq(SchoolVotes(), 0, "no vote")
+    Eq(ForeverFloatingTextDB.spellSchools, nil, "nothing learned")
+end)
+
+-- Lightning Bolt's line came before its hit 34 times of 39 (the author's 2026-11-13 20:11 log,
+-- 0.007-0.118 s): with the school unlearned such a hit found nothing "on its way".
+Test("a flying spell with no school learned: its hit after its line is yours outside a group, and teaches the school", function()
+    NewGame()
+    local function Bolt(t)
+        At(t, function() Cast(133) end)
+        At(t + 0.8, function() Line("SPELL_DAMAGE") end)
+        At(t + 0.85, function() Hit("nameplate1", 4) end)
+    end
+    Bolt(1) -- in a group: can't be told from a stranger's
+    Run(4)
+    Eq(#Decisions("show"), 0, "in a group, dropped while unlearned")
+    SIM.inGroup = false
+    Bolt(5); Bolt(9); Bolt(13)
+    Run(16)
+    Eq(Count(Decisions("show"), "its school not learned yet"), 3, "outside a group, shown")
+    Eq(ForeverFloatingTextDB.spellSchools.Fireball, 4, "and learned from the three")
+    SIM.inGroup = true
+    Bolt(17)
+    Run(20)
+    Eq(Count(Decisions("show"), "while your Fireball was on its way)"), 1, "in a group, shown once learned")
+end)
+
+Test("outside a group an unlearned spell on its way takes no physical hit, nor a hit with two lines waiting", function()
+    NewGame()
+    SIM.inGroup = false
+    At(1, function() Cast(133) end)
+    At(1.8, function() Line("SPELL_DAMAGE") end)
+    At(1.85, function() Hit("nameplate1", 1) end) -- physical: a swing's or a stranger's
+    At(5, function() Cast(133) end)
+    At(5.8, function() Line("SPELL_DAMAGE"); Line("SPELL_DAMAGE") end)
+    At(5.85, function() Hit("nameplate1", 4) end)
+    Run(8)
+    Eq(#Decisions("show"), 0, "neither shown")
+    Eq(SchoolVotes(), 0, "no vote")
+end)
+
+local function KnownSchools()
+    SIM.spells[403] = {name = "Lightning Bolt", harmful = true}
+    ForeverFloatingTextDB.spellSchools = {Stormstrike = 1, ["Lightning Bolt"] = 8, ["Earth Shock"] = 8}
+end
+
+-- The author's 2026-11-13 10:28 dungeon log, 181979.301: Lightning Bolt cast at one mob, a hunter's
+-- Serpent Sting tick on another 0.013 s after the bolt's line shown as the bolt's, the bolt's own
+-- hit 0.13 s later dropped.
+Test("a spell on its way counts at the mob it was cast at: a stranger's hit of its school on another mob isn't it", function()
+    NewGame()
+    KnownSchools()
+    At(1, function() Cast(403) end)
+    At(1.5, function() Line("SPELL_DAMAGE") end)
+    At(1.52, function() Hit("nameplate2", 8) end)
+    At(1.6, function() Hit("nameplate1", 8) end)
+    Run(3)
+    Eq(#Decisions("show"), 1, "one shown")
+    Eq(Count(Decisions("show"), "[nameplate1 "), 1, "the hit on the mob you cast at")
+end)
+
+-- The same log's sister (2026-11-13 20:11, 217689.774), replayed with Stormstrike's school learned:
+-- a rogue's physical hit in the frame of a Lightning Bolt's line went first and took it.
+Test("a physical spell that already landed gives a stranger's physical hit no edge over your spell on its way", function()
+    NewGame()
+    KnownSchools()
+    At(1, function() Cast(17364); Line("SPELL_DAMAGE"); Hit("nameplate1", 1) end) -- Stormstrike, landed
+    At(2, function() Cast(403) end)
+    At(2.166, function() Line("SPELL_DAMAGE"); Hit("nameplate1", 1) end) -- the bolt's line, a stranger's hit
+    At(2.2, function() Hit("nameplate1", 8) end) -- the bolt's own
+    Run(4)
+    Eq(Count(Decisions("show"), "while your Lightning Bolt was on its way"), 1, "the bolt's hit shown")
+    Eq(#Decisions("show"), 2, "Stormstrike's and the bolt's, not the stranger's")
+end)
+
+Test("an instant spell that missed is no longer on its way, with misses not shown too", function()
+    NewGame() -- misses aren't shown by default: the miss itself never reaches the matching
+    KnownSchools()
+    At(1, function() Cast(8042); Line("SPELL_MISSED", "RESIST"); Miss("nameplate1", "RESIST") end)
+    At(1.5, function() Line("SPELL_DAMAGE") end) -- a line of yours with no hit yet (a proc's)
+    At(1.52, function() Hit("nameplate1", 8) end) -- a stranger's nature hit on that mob
+    Run(3)
+    Eq(#Decisions("show"), 0, "not taken as the Earth Shock that missed")
+end)
+
+-- The author's two dungeon logs of 2026-11-13: 9 swings decided yours after the mob's plate had
+-- gone, "yours, not drawn" (positions are hidden there, so no place to draw them at).
+Test("in a dungeon a number decided after its nameplate went shows at the damage position", function()
+    NewGame()
+    SIM.securePositions = true
+    At(1, function() Swing(); Cast(36936) end)
+    At(1.461, function() Hit() end)
+    At(1.6, function() SIM.Fire("NAME_PLATE_UNIT_REMOVED", "nameplate1") end)
+    Run(3)
+    Eq(Count(Decisions("show"), "its nameplate went away, shown at the damage position"), 1, "shown")
+    local numbers = Shown("damage")
+    Eq(#numbers, 1, "one number at the damage position")
+    Ok(numbers[1].plate == nil, "not anchored to a plate")
+end)
+
+-- The author's saved "3.13" held two weapons' swings (2026-11-14), and a replaced weapon's three
+-- delays were still there for any later weapon swinging at its time.
+Test("learned swing delays are the main-hand weapon's: put away with another weapon, back with the first", function()
+    NewGame({db = {swingAnims = {["3.60"] = {{d = 0.464, n = 30}}}}})
+    local item = 1001
+    function GetInventoryItemID(_, slot) return slot == 16 and item or nil end
+    local db = ForeverFloatingTextDB
+    At(1, function() Swing(3.60) end)
+    Run(2)
+    Eq(db.swingWeapon, 1001, "the first weapon seen")
+    Ok(db.swingAnims and db.swingAnims["3.60"], "takes what was learned before")
+    item = 2002
+    At(3, function() Swing(3.60) end)
+    Run(4)
+    Eq(db.swingAnims, nil, "another weapon starts with nothing")
+    Ok(db.swingAnimsBy[1001].anims["3.60"], "the first weapon's delays put away")
+    item = 1001
+    At(5, function() Swing(3.60) end)
+    Run(6)
+    Ok(db.swingAnims and db.swingAnims["3.60"], "back with the weapon")
+    Eq(db.swingAnimsBy[1001], nil, "no longer put away")
+    function GetInventoryItemID() return SIM.Secret(3003) end -- hidden: nothing changes
+    At(7, function() Swing(3.60) end)
+    Run(8)
+    Eq(db.swingWeapon, 1001, "a hidden item changes nothing")
+    Ok(db.swingAnims["3.60"], "delays kept")
+    SlashCmdList.FOREVERFLOATINGTEXT("forget")
+    Eq(db.swingAnims, nil, "/fft forget clears them")
+    Eq(db.swingAnimsBy, nil, "and the ones put away")
+end)
+
+Test("a swing time not swung at for 30 days is forgotten at login", function()
+    NewGame({db = {swingAnims = {["3.10"] = {{d = 0.366, n = 5}, seen = 100}, ["3.60"] = {{d = 0.464, n = 30}}}}})
+    local db = ForeverFloatingTextDB
+    Eq(db.swingAnims["3.60"].seen, 0, "one with no date gets today's at login")
+    function time() return 100 + 31 * 86400 end
+    At(1, function() Swing(3.60) end) -- still swung at
+    Run(2)
+    G.FFT:CleanLearned() -- the next login
+    Eq(db.swingAnims["3.10"], nil, "31 days unused: forgotten")
+    Ok(db.swingAnims["3.60"], "the one in use kept")
+end)
+
+------------------------------------------------------------------------
+-- (1.31.17, 1.31.18) Reminders at login, merged alerts
+------------------------------------------------------------------------
+local function Said(text)
+    local n = 0
+    for _, l in ipairs(SIM.printed) do if l:find(text, 1, true) then n = n + 1 end end
+    return n
+end
+
+-- (1.31.18) Filter.lua and GameSettings.lua are new files: a /reload with the game running loads
+-- the new Core.lua without them
+Test("updated with the game running (new files not loaded): no error, and login says to restart the game", function()
+    NewGame({without = {["Filter.lua"] = true, ["GameSettings.lua"] = true}})
+    At(1, function() Swing() end)
+    At(1.461, function() Hit() end)
+    Run(8)
+    Eq(Said("close the game and start it again"), 1, "said once")
+    Eq(Count(Decisions("show"), "your swing"), 1, "your hits are still told")
+    SlashCmdList.FOREVERFLOATINGTEXT("status")
+    SlashCmdList.FOREVERFLOATINGTEXT("cvars")
+    SlashCmdList.FOREVERFLOATINGTEXT("off")
+    SIM.Fire("PLAYER_LOGOUT")
+    NewGame()
+    Run(8)
+    Eq(Said("close the game and start it again"), 0, "nothing said with every file loaded")
+end)
+
+Test("until the addon's own Combat Log filter is the one loaded, login says to /reload once", function()
+    NewGame({ownFilter = false}) -- a new install: nothing written at a logout yet
+    Eq(G.FFT:OwnFilterReady(), false, "not the addon's filter")
+    Run(9)
+    Eq(Said("/reload once to finish the setup"), 1, "said once")
+    NewGame()
+    Eq(G.FFT:OwnFilterReady(), true, "the addon's filter, as this version writes it")
+    Run(9)
+    Eq(Said("/reload once to finish the setup"), 0, "nothing said")
+    -- a filter an older version wrote, before an event was added to it
+    for _, f in ipairs(Blizzard_CombatLog_Filters.filters) do
+        if f.name == "Forever Floating Text" then f.filters[1].eventList.SPELL_DISPEL = nil end
+    end
+    Eq(G.FFT:OwnFilterReady(), false, "an event this version asks for is missing")
+end)
+
+Test("a saved recording that isn't running is mentioned at login; an empty or running one isn't", function()
+    NewGame() -- recording (NewGame turns it on)
+    G.FFT:SavedLogReminder()
+    Run(8)
+    Eq(Said("is still saved"), 0, "not while recording")
+    SlashCmdList.FOREVERFLOATINGTEXT("debug") -- stopped: its lines stay
+    G.FFT:SavedLogReminder()
+    Run(16)
+    Eq(Said("is still saved"), 1, "said")
+    SlashCmdList.FOREVERFLOATINGTEXT("clearlog")
+    G.FFT:SavedLogReminder()
+    Run(24)
+    Eq(Said("is still saved"), 1, "not again once emptied")
+end)
+
+Test("a repeated alert merges into the one up and starts its time over", function()
+    NewGame()
+    local first
+    At(1, function() first = G.FFT:ShowAlert("Purged") end)
+    Run(1.5)
+    SIM.RunOnUpdate(0.9) -- 0.9 s of its 1.2 s gone
+    Ok(first.age > 0.8, "the first one is fading")
+    local again = G.FFT:ShowAlert("Purged")
+    Ok(again == first, "the same text, now x2")
+    Eq(first.age, 0, "its time starts over")
+end)
+
+-- (1.31.19) The color was picked as the hit came, before anyone knew what it was: Windfury's
+-- attacks as auto attacks, a swing landing just after a cast as an ability.
+Test("Windfury's attacks draw in the physical color, a swing's own hit in the auto-attack color whatever was cast", function()
+    NewGame()
+    local phys, auto = G.FFT.Color("colorPhysical"), G.FFT.Color("colorAuto")
+    At(1, function() Swing(); Line("SPELL_DAMAGE"); Line("SPELL_DAMAGE") end)
+    At(1.228, function() Hit() end) -- Windfury's two attacks
+    At(1.504, function() Hit() end)
+    At(1.958, function() Hit() end) -- the swing's own
+    At(5, function() Swing() end)
+    At(5.44, function() Cast(36936) end) -- a cast of yours 0.02 s before the swing's hit lands
+    At(5.461, function() Hit() end)
+    Run(8)
+    local colors = {}
+    for _, s in ipairs(G.shown) do
+        if s.plate ~= nil then
+            local c = s.color
+            colors[#colors + 1] = (c[1] == phys[1] and c[2] == phys[2] and c[3] == phys[3]) and "physical"
+                or (c[1] == auto[1] and c[2] == auto[2] and c[3] == auto[3]) and "auto" or "other"
+        end
+    end
+    Eq(table.concat(colors, " "), "physical physical auto auto", "the numbers over the mob, in order")
+end)
+
+------------------------------------------------------------------------
+-- (1.31.20) The 2026-11-14 08:47 log (solo, the game's file beside it): 12 Windfury procs in 2.3
+-- minutes, 4 of them the totem and the enchant at once, 5 "Windfury!" shown and never "x2"
+------------------------------------------------------------------------
+local function WindfuryProcs() -- every alert, a merged "x2" too (WindfuryAlerts counts the texts)
+    local n = 0
+    for _, l in ipairs(ForeverFloatingTextLog.lines) do if l:find("Windfury proc (alert shown)", 1, true) then n = n + 1 end end
+    return n
+end
+
+-- 5214.912: swing, three damage lines and one hit in its frame (the totem's), the enchant's two
+-- attacks 0.23 and 0.50 s later, the swing's own 0.96 s after: one alert, for the enchant
+Test("the totem's hit in your swing's own frame says \"Windfury!\"; with the enchant's proc too, two alerts", function()
+    NewGame(); Shaman()
+    At(1, function() Swing(3.40); Line("SPELL_DAMAGE"); Line("SPELL_DAMAGE"); Line("SPELL_DAMAGE"); Hit() end)
+    At(1.228, function() Hit() end)
+    At(1.503, function() Hit() end)
+    At(1.96, function() Hit() end)
+    Run(4)
+    Eq(#Decisions("show"), 4, "the totem's hit, the enchant's two attacks, the swing's own")
+    Eq(#Decisions("drop"), 0, "nothing dropped")
+    Eq(WindfuryProcs(), 2, "the totem's proc and the enchant's")
+    Eq(WindfuryAlerts(), 1, "merged into one text (x2)")
+end)
+
+-- 5190.267 (Stormstrike and the totem's hit in one frame, no text at all) and 5181.599 (the same
+-- on the killing blow)
+Test("the totem's hit in Stormstrike's own frame says \"Windfury!\": the cast's own hit first, the next is Windfury's", function()
+    NewGame(); Shaman()
+    At(1, function() Cast(17364); Line("SPELL_DAMAGE"); Hit(); Line("SPELL_DAMAGE"); Hit() end)
+    Run(3)
+    Eq(Count(Decisions("show"), "your Combat Log line, +0.000s"), 2, "both hits shown")
+    Eq(WindfuryProcs(), 1, "one alert: Stormstrike's own hit isn't a proc")
+    At(5, function() Cast(17364); Line("SPELL_DAMAGE"); Hit(); Line("PARTY_KILL"); Line("SPELL_DAMAGE"); Hit() end)
+    Run(7)
+    Eq(WindfuryProcs(), 2, "and on the killing blow")
+    At(9, function() Cast(17364); Line("SPELL_DAMAGE"); Hit() end) -- Stormstrike alone
+    Run(11)
+    Eq(WindfuryProcs(), 2, "none for a Stormstrike with no proc")
+end)
+
+-- 5118.818: the totem's and the enchant's lines 0.111 s after Stormstrike, the totem's hit with
+-- them; the enchant's first attack missed 0.23 s later, its second hit 0.50 s later
+Test("the totem's hit with its line 0.11 s after Stormstrike says \"Windfury!\", and the enchant's proc after it", function()
+    NewGame({db = {showMisses = true}}); Shaman()
+    At(1, function() Cast(17364); Line("SPELL_DAMAGE"); Hit() end)
+    At(1.111, function() Line("SPELL_DAMAGE"); Line("SPELL_DAMAGE"); Hit() end)
+    At(1.341, function() Line("SPELL_MISSED", "MISS"); Miss("nameplate1", "MISS") end)
+    At(1.616, function() Hit() end)
+    Run(4)
+    Eq(#Decisions("drop"), 0, "nothing dropped")
+    Eq(WindfuryProcs(), 2, "the totem's hit, then the enchant's attack that landed")
+end)
+
+-- 5234.508: a swing that kills, with one damage line (Windfury Weapon) and no hit to come
+Test("Windfury on a swing that kills (no number comes) says \"Windfury!\"; not on another class, not with a cast", function()
+    NewGame(); Shaman()
+    At(1, function() Swing(3.40); Line("PARTY_KILL"); Line("SPELL_DAMAGE") end)
+    Run(3)
+    Eq(WindfuryProcs(), 1, "the proc on the killing swing")
+    At(5, function() Swing(3.40); Line("PARTY_KILL") end) -- a killing swing with no proc
+    At(9, function() Cast(8042); Line("SPELL_DAMAGE"); Line("PARTY_KILL") end) -- a Shock that kills, its number not come
+    At(13, function() Swing(3.40); Line("PARTY_KILL"); Line("SPELL_PERIODIC_DAMAGE") end) -- a tick on a mob with no plate
+    Run(16)
+    Eq(WindfuryProcs(), 1, "none for those")
+    -- a proc on a mob still alive in the frame of a kill elsewhere: one alert, not a second at its attacks
+    At(17, function() Swing(3.40); Line("PARTY_KILL"); Line("SPELL_DAMAGE") end)
+    At(17.228, function() Hit() end)
+    Run(20)
+    Eq(WindfuryProcs(), 2, "one alert for that proc")
+    UnitClass = function() return "Warrior", "WARRIOR", 1 end
+    At(21, function() Swing(3.40); Line("PARTY_KILL"); Line("SPELL_DAMAGE") end)
+    Run(24)
+    Eq(WindfuryProcs(), 2, "no alert on another class")
+end)
+
+-- 5178.577: Stormstrike hit, and the miss line in its frame was the totem's attack
+Test("a miss line in the frame of a cast whose own hit came doesn't say the cast missed", function()
+    NewGame({db = {showMisses = true}}); Shaman()
+    At(1, function() Cast(17364); Line("SPELL_DAMAGE"); Hit(); Line("SPELL_MISSED", "MISS"); Miss("nameplate1", "MISS") end)
+    Run(3)
+    Eq(#Decisions("show"), 2, "Stormstrike's hit and the totem's miss")
+    for _, l in ipairs(ForeverFloatingTextLog.lines) do
+        Ok(not l:find("missed, not on its way", 1, true), "Stormstrike told as missed: " .. l)
+    end
+    Eq(WindfuryProcs(), 0, "and Stormstrike's own hit is no Windfury proc")
+end)
+
+------------------------------------------------------------------------
+-- (1.31.21) The version, where a report needs it; the options window built with no error
+------------------------------------------------------------------------
+-- the .toc's fields, as C_AddOns.GetAddOnMetadata gives them (the stub has none)
+local function TocFields()
+    local toc = READ(ADDON .. ".toc")
+    C_AddOns.GetAddOnMetadata = function(_, field)
+        return toc:match("## " .. field:gsub("%-", "%%-") .. ": ([^\r\n]+)")
+    end
+    return toc:match("## Version: ([^\r\n]+)")
+end
+
+Test("the version is in /fft status and in the first line of a recording", function()
+    NewGame()
+    local version = TocFields()
+    Ok(version and version:find("^%d+%.%d+%.%d+$"), "the .toc has a version")
+    Eq(G.FFT.Meta("Version"), version, "read from the .toc")
+    Eq(G.FFT.Meta("Author"), "umibear", "and the author")
+    Eq(G.FFT.Meta("Nothing-Such"), nil, "a field that isn't there")
+    SlashCmdList.FOREVERFLOATINGTEXT("status")
+    Eq(Said("version " .. version .. ", enabled"), 1, "/fft status says it")
+    SlashCmdList.FOREVERFLOATINGTEXT("debug") -- off
+    SlashCmdList.FOREVERFLOATINGTEXT("debug") -- on: a new recording
+    local lines = ForeverFloatingTextLog.lines
+    local first
+    for _, l in ipairs(lines) do if l:find("^=== recording started") then first = l end end
+    Ok(first and first:find(", version " .. version .. " ===", 1, true), "the recording's first line: " .. tostring(first))
+    Ok(first:find("in group: true, raid: false", 1, true), "with what the replay reads from it, as before")
+end)
+
+-- Options.lua only builds the game's settings window, which the fake game doesn't have: here a
+-- bare stand-in for the Settings API, enough to run every line of it and press the About page's buttons
+Test("the options window builds with no error; its About page says the version and the author", function()
+    NewGame()
+    local version = TocFields()
+    local pages, current = {}, nil
+    local function Page(name) current = {name = name, items = {}}; pages[#pages + 1] = current; return current end
+    local function Layout(page) return {AddInitializer = function(_, item) page.items[#page.items + 1] = item end} end
+    local function Setting(key)
+        return {key = key, SetValueChangedCallback = function() end, SetValue = function() end}
+    end
+    Settings = {
+        VarType = {Boolean = "boolean", Number = "number", String = "string"},
+        RegisterVerticalLayoutCategory = function(name) local p = Page(name); p.GetID = function() return 1 end; return p, Layout(p) end,
+        RegisterVerticalLayoutSubcategory = function(_, name) local p = Page(name); return p, Layout(p) end,
+        RegisterAddOnSetting = function(page, _, key) page.items[#page.items + 1] = {kind = "setting", name = key}; return Setting(key) end,
+        CreateCheckbox = function() end, CreateSlider = function() end, CreateDropdown = function() end,
+        CreateSliderOptions = function() return {SetLabelFormatter = function() end} end,
+        CreateControlTextContainer = function() return {Add = function() end, GetData = function() return {} end} end,
+        CreateColorSwatchInitializer = function(setting) return {kind = "swatch", name = setting.key} end,
+        RegisterAddOnCategory = function() end, OpenToCategory = function() end,
+    }
+    function CreateSettingsListSectionHeaderInitializer(name) return {kind = "header", name = name} end
+    function CreateSettingsButtonInitializer(name, text, onClick, tooltip)
+        return {kind = "button", name = name, text = text, onClick = onClick, tooltip = tooltip}
+    end
+    -- the copy window's title is a text of the game's frame template: given one here
+    local realCreate = CreateFrame
+    CreateFrame = function(kind, name, ...)
+        local f = realCreate(kind, name, ...)
+        if name == "ForeverFloatingTextCopy" then rawset(f, "TitleText", realCreate("FontString")) end
+        return f
+    end
+    assert(load(READ("Options.lua"), "@Options.lua"))(ADDON, G.ns)
+    G.ns.CreateOptions(G.FFT)
+    local about = pages[#pages]
+    Eq(about.name, "About", "the last page")
+    Eq(about.items[1].kind, "header", "it opens with a heading")
+    Eq(about.items[1].name, ("Version %s, by umibear"):format(version), "the version and the author, from the .toc")
+    local pressed = 0
+    for _, item in ipairs(about.items) do
+        if item.kind == "button" then
+            Ok(type(item.tooltip) == "string" and #item.tooltip > 20, item.name .. " explains itself")
+            item.onClick()
+            pressed = pressed + 1
+        end
+    end
+    Eq(pressed, 3, "website, how to report, status")
+    Eq(ForeverFloatingTextCopy.edit:GetText(), "https://github.com/umibear/ForeverFloatingText", "the address to copy")
+    Eq(ForeverFloatingTextCopy.TitleText:GetText(), "Forever Floating Text website (Ctrl+C)", "the window says what it holds")
+    Eq(Said("to report a problem (version " .. version .. ")"), 1, "how to report, with the version")
+    Eq(Said("version " .. version .. ", enabled"), 1, "the status")
+    Ok(#pages >= 13, "every page built: " .. #pages)
+    -- every setting the menu offers has a default (a typo in a key would give it none)
+    for _, page in ipairs(pages) do
+        for _, item in ipairs(page.items) do
+            if item.kind == "setting" then
+                Ok(G.FFT.DEFAULTS[item.name] ~= nil, page.name .. ": no default for the setting " .. tostring(item.name))
+            end
+        end
+    end
+    Settings, CreateSettingsListSectionHeaderInitializer, CreateSettingsButtonInitializer = nil, nil, nil
+end)
+
+------------------------------------------------------------------------
+-- (1.31.22) The 2026-11-14 11:20 log (solo, 12 minutes, the game's file beside it): a killing
+-- swing's number comes through your target once the mob's nameplate is gone; 5 dropped
+------------------------------------------------------------------------
+-- the mob dies: its nameplate goes, it stays your target. As in game, the handover at the plate's
+-- removal doesn't happen (there the reason isn't known; here "is it your target" is made to say no)
+local function PlateGoes(unit)
+    local real = UnitIsUnit
+    UnitIsUnit = function() return false end
+    SIM.Fire("NAME_PLATE_UNIT_REMOVED", unit)
+    UnitIsUnit = real
+    SIM.units[unit].plate = nil
+end
+local function AlertsLogged()
+    local n = 0
+    for _, l in ipairs(ForeverFloatingTextLog.lines) do if l:find("Windfury proc (alert shown)", 1, true) then n = n + 1 end end
+    return n
+end
+
+-- 14356.922: swing with your kill line, `target WOUND` 0.461 s later, "no Combat Log line of yours"
+Test("a killing swing's number, reported for your target after its nameplate went, is yours", function()
+    NewGame(); Shaman()
+    At(1, function() Swing(3.40); Line("PARTY_KILL") end)
+    At(1.02, function() PlateGoes("nameplate1") end)
+    At(1.461, function() Hit("target") end)
+    Run(3)
+    Eq(Count(Decisions("show"), "your swing, 0.4"), 1, "the swing's number")
+    Eq(#Decisions("drop"), 0, "not dropped")
+    local atSpot = 0
+    for _, s in ipairs(G.shown) do if s.plate == nil and s.key == "damage" then atSpot = atSpot + 1 end end
+    Eq(atSpot, 1, "at the damage position: there is no nameplate to draw it over")
+end)
+
+-- 14656.580: the same with Windfury Weapon's line in the swing's frame and the triggered cast that
+-- comes with some swings; its attack's number 0.50 s later through your target. No alert in game.
+Test("Windfury on a killing swing with a triggered cast in its frame: one alert, and its attack through your target is yours", function()
+    NewGame(); Shaman()
+    At(1, function() Swing(3.40); Cast(133, true); Line("PARTY_KILL"); Line("SPELL_DAMAGE") end)
+    At(1.02, function() PlateGoes("nameplate1") end)
+    At(1.5, function() Hit("target") end)
+    Run(3)
+    Eq(AlertsLogged(), 1, "one alert for the proc: at the kill, not again at its attack")
+    Eq(Count(Decisions("show"), "your extra attack (Windfury)"), 1, "the attack's number shown")
+    Eq(#Decisions("drop"), 0, "nothing dropped")
+    At(5, function() Swing(3.40); Cast(8042); Line("SPELL_DAMAGE"); Line("PARTY_KILL") end) -- a cast you sent: its own line
+    Run(8)
+    Eq(AlertsLogged(), 1, "none for a killing swing with your own cast's line in its frame")
+end)
+
+Test("what you did at one target is never taken over by the next target with no nameplate", function()
+    NewGame(); Shaman()
+    At(1, function() Swing(3.40); Line("PARTY_KILL") end)
+    At(1.02, function() PlateGoes("nameplate1") end)
+    At(1.2, function() -- another mob, far away, targeted
+        SIM.AddUnit("other", {guid = "Creature-0-1-1-1-9-other", name = "other", enemy = true})
+        SIM.units.other.plate = nil
+        SIM.target = "other"
+        SIM.Fire("PLAYER_TARGET_CHANGED")
+    end)
+    At(1.461, function() Hit("target") end) -- someone's hit on that mob
+    Run(3)
+    Eq(#Decisions("show"), 0, "not shown as your swing's")
+end)
+
+------------------------------------------------------------------------
+-- (1.31.23) The 2026-11-14 11:55 log (solo, a paladin on the same mobs, the game's file beside
+-- it): 16554.234, his Holy Strike crit in the frame of your two Windfury lines shown as yours
+------------------------------------------------------------------------
+Test("a hit of a school you aren't known to deal takes no line of yours: your Windfury keeps both", function()
+    NewGame(); Shaman(); KnownSchools()
+    At(1, function() Swing(3.40) end)
+    At(1.1, function() Line("SPELL_DAMAGE"); Line("SPELL_DAMAGE"); Hit("nameplate2", 2, "CRITICAL") end) -- a paladin's, on another mob
+    At(1.33, function() Hit() end)
+    At(1.6, function() Hit() end)
+    Run(4)
+    Eq(Count(Decisions("show"), "[nameplate2 "), 0, "the holy hit isn't shown")
+    Eq(Count(Decisions("show"), "your extra attack (Windfury)"), 2, "both Windfury attacks have their lines")
+    -- alone with one line of yours, no swing or cast of yours at that mob: still not yours
+    At(5, function() Line("SPELL_DAMAGE"); Hit("nameplate2", 64) end)
+    Run(7)
+    Eq(Count(Decisions("show"), "[nameplate2 "), 0, "nor an arcane hit alone with a line")
+end)
+
+Test("a school not known yet still counts while something of yours can be teaching it", function()
+    NewGame(); Shaman(); KnownSchools()
+    SIM.spells[8056] = {name = "Frost Shock", harmful = true}
+    -- a spell of yours with no school learned, in its cast's frame
+    At(1, function() Cast(8056); Line("SPELL_DAMAGE"); Hit("nameplate1", 16) end)
+    -- a damage shield's own line (Thorns on you: no cast, any school)
+    At(3, function() Line("DAMAGE_SHIELD"); Hit("nameplate1", 64) end)
+    -- a proc of your swing, on the mob you swung at
+    At(5, function() Swing(3.40) end)
+    At(5.05, function() Line("SPELL_DAMAGE"); Hit("nameplate1", 32) end)
+    At(5.464, function() Hit() end)
+    Run(8)
+    Eq(Count(Decisions("show"), "your Combat Log line, +0.000s"), 3, "the new spell's, the shield's and the proc's hits shown")
+    Eq(#Decisions("drop"), 0, "nothing dropped")
+    -- once learned, the school is simply known
+    At(9, function() Cast(8056); Line("SPELL_DAMAGE"); Hit("nameplate1", 16) end)
+    At(12, function() Cast(8056); Line("SPELL_DAMAGE"); Hit("nameplate1", 16) end)
+    Run(14)
+    Eq(ForeverFloatingTextDB.spellSchools["Frost Shock"], 16, "learned from three casts")
+    At(15, function() Line("SPELL_DAMAGE"); Hit("nameplate2", 16) end) -- a frost hit with your line: can be yours now
+    Run(17)
+    Eq(Count(Decisions("show"), "[nameplate2 "), 1, "a hit of a school you deal takes its line as before")
+end)
+
+Test("ticks of a spell whose school isn't learned count while it is on the mob; a stranger's tick elsewhere doesn't", function()
+    NewGame(); Shaman(); KnownSchools()
+    SIM.spells[172] = {name = "Corruption", harmful = true} -- only ticks: nothing ever teaches its school
+    At(1, function() Cast(172) end)
+    At(4, function() Line("SPELL_PERIODIC_DAMAGE"); Hit("nameplate1", 32) end)
+    At(7, function() Line("SPELL_PERIODIC_DAMAGE"); Hit("nameplate1", 32) end)
+    At(8, function() Line("SPELL_PERIODIC_DAMAGE"); Hit("nameplate2", 32) end) -- with a line of yours, on a mob you cast nothing at
+    Run(10)
+    Eq(Count(Decisions("show"), "[nameplate1 "), 2, "its two ticks shown")
+    Eq(Count(Decisions("show"), "[nameplate2 "), 0, "not the shadow hit on the other mob")
+end)
+
+------------------------------------------------------------------------
+-- (1.31.24) The 2026-11-14 11:55 log with the game's file, 16400.804 and 16887.625: a Healing
+-- Wave with its 3.0 s cast bar; the game dropped "Maelstrom Ready!" at its end, Maelstrom Weapon
+-- stayed at 5 stacks and the next Lightning Bolt, 25 s later, was still instant
+------------------------------------------------------------------------
+Test("a spell cast with its cast bar doesn't use up the game's proc; the next instant spell does", function()
+    NewGame()
+    SIM.spells[403] = {name = "Lightning Bolt", harmful = true}
+    SIM.spells[331] = {name = "Healing Wave", helpful = true}
+    local function ReadyGone() Feed("SPELL_AURA_END", SIM.Secret("Maelstrom Ready!")) end
+    At(1, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")) end)
+    At(2, function() SIM.Fire("UNIT_SPELLCAST_START", "player", "Cast-hw-1", 331) end)
+    At(5, function() SIM.Fire("UNIT_SPELLCAST_SUCCEEDED", "player", "Cast-hw-1", 331); ReadyGone() end)
+    Run(6)
+    Eq(ProcsUp(), "game", "still up after the hard-cast heal, though an aura went with it")
+    At(7, function() Cast(403); ReadyGone(); HiddenRemove() end) -- the instant bolt takes the stacks
+    Run(8)
+    Eq(ProcsUp(), "", "used up by the instant bolt")
+    -- the same spell with no cast bar this time (made instant) does use it
+    At(9, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")) end)
+    At(10, function() Cast(331); HiddenRemove() end)
+    Run(11)
+    Eq(ProcsUp(), "", "an instant Healing Wave with a removal uses it")
+    -- a cast bar that was interrupted says nothing about a later instant cast
+    At(12, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")) end)
+    At(13, function() SIM.Fire("UNIT_SPELLCAST_START", "player", "Cast-hw-2", 331) end)
+    At(15, function() Cast(403); HiddenRemove() end)
+    Run(16)
+    Eq(ProcsUp(), "", "the bolt after an abandoned cast bar uses it")
 end)
 
 ------------------------------------------------------------------------

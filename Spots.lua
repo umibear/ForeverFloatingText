@@ -213,6 +213,10 @@ function FFT:SpotText(kind, text, color, font, outline, size, fmt, args)
         m.n, m.at = m.n + 1, now
         m.shown = ("%s x%d"):format(text, m.n)
         m.fs:SetText(m.shown)
+        -- (1.31.18) and it starts over: merged late, "x2" showed only for the rest of the first one's
+        -- fade (a repeat 0.9 s into 1.2 s was gone in 0.3 s)
+        m.fs.age = 0
+        m.fs:SetAlpha(1)
         return m.fs
     end
     local fs = self:Show(nil, text, color, false,
