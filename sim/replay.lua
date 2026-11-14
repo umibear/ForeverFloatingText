@@ -233,9 +233,10 @@ for _, l in ipairs(ForeverFloatingTextLog.lines) do
 end
 if REPLAY_DECISIONS then
     for _, l in ipairs(ForeverFloatingTextLog.lines) do
-        local dec, rest, key = l:match("^%d+%.%d+   (%a+) (.-) %[(nameplate%d+ [%d.]+)%]$")
+        -- (1.31.25) the tag ends with the hit's school and kind ("1 CRITICAL"): a sixth column
+        local dec, rest, key, kind = l:match("^%d+%.%d+   (%a+) (.-) %[(nameplate%d+ [%d.]+) ?([^%]]*)%]$")
         local orig = key and origOf[key] and table.remove(origOf[key], 1)
-        if orig then out[#out + 1] = ("DEC\t%s\t%s\t%s\t%s"):format(dec, key:match("^%S+"), orig, rest) end
+        if orig then out[#out + 1] = ("DEC\t%s\t%s\t%s\t%s\t%s"):format(dec, key:match("^%S+"), orig, rest, kind) end
     end
 end
 table.insert(out, 1, ("hits on mobs %d; in the log: shown %d, dropped %d; replayed now: shown %d, dropped %d")

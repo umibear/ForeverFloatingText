@@ -3324,6 +3324,112 @@ Test("ticks of a spell whose school isn't learned count while it is on the mob; 
 end)
 
 ------------------------------------------------------------------------
+-- (1.31.25) The 2026-11-14 14:18 dungeon log, 27050.045: Stormstrike's critical hit and a mage's
+-- frost hit on one nameplate in one frame, one line of yours: one shown, one dropped, and the
+-- log's two lines carried the same tag
+------------------------------------------------------------------------
+Test("two hits on one nameplate in one moment: the log's show / drop lines say which is which", function()
+    NewGame(); Shaman(true); KnownSchools()
+    ForeverFloatingTextDB.spellSchools["Frost Shock"] = 16 -- frost is a school you deal
+    At(1, function()
+        Cast(17364) -- Stormstrike
+        Hit("nameplate1", 16)
+        Line("SPELL_DAMAGE")
+        Hit("nameplate1", 1, "CRITICAL")
+    end)
+    Run(3)
+    local shown, dropped = Decisions("show"), Decisions("drop")
+    Eq(#shown, 1, "one shown")
+    Eq(#dropped, 1, "one dropped")
+    Eq(Count(shown, " 1 CRITICAL]"), 1, "the cast's own hit, named by its school and kind")
+    Eq(Count(dropped, " 16]"), 1, "the frost hit, named by its school")
+end)
+
+------------------------------------------------------------------------
+-- (1.31.26) The same dungeon log, 26473.111: Magma Totem's lines, one for each mob it hit, and a
+-- groupmate's physical hits on your target in that frame: they were shown and the totem's own
+-- fire hits on the other mobs dropped. 30189.539: a groupmate's bleed in Lightning Bolt's frame.
+------------------------------------------------------------------------
+Test("a physical hit takes no line of its frame while nothing physical of yours is landing", function()
+    NewGame(); Shaman(true); KnownSchools()
+    ForeverFloatingTextDB.spellSchools["Flame Shock"] = 4
+    SIM.target = "nameplate1"
+    -- the totem's pulse on two mobs, a groupmate's two hits on your target
+    At(1, function()
+        Line("SPELL_DAMAGE"); Hit("nameplate1", 4)
+        Line("SPELL_DAMAGE"); Hit("nameplate2", 4)
+        Hit("nameplate1", 1, "CRITICAL"); Hit("nameplate1", 1)
+    end)
+    Run(3)
+    Eq(Count(Decisions("show"), " 4]"), 2, "both fire hits have their lines")
+    Eq(Count(Decisions("show"), " 1]") + Count(Decisions("show"), " 1 CRITICAL]"), 0, "neither physical hit shown")
+    Eq(Count(ForeverFloatingTextLog.lines, "nothing physical of yours is landing now"), 2, "and the log says why")
+    -- a groupmate's hit in the frame of your Lightning Bolt's line: the bolt's own hit comes later
+    At(5, function() Cast(403) end)
+    At(5.3, function() Line("SPELL_DAMAGE"); Hit("nameplate1", 1) end)
+    At(5.35, function() Hit("nameplate1", 8) end)
+    Run(8)
+    Eq(Count(Decisions("show"), " 1]"), 0, "not shown as the bolt")
+    Eq(Count(Decisions("show"), "while your Lightning Bolt was on its way"), 1, "the bolt's hit has its line")
+end)
+
+Test("a physical hit still takes its line with a cast, a swing, a tick or a pet of yours to explain it", function()
+    NewGame(); Shaman(true); KnownSchools()
+    ForeverFloatingTextDB.spellSchools["Flame Shock"] = 4
+    SIM.spells[8050] = {name = "Flame Shock", harmful = true}
+    SIM.spells[703] = {name = "Garrote", harmful = true} -- a bleed: only ticks, its school never learned
+    SIM.target = "nameplate1"
+    -- an instant attack of yours: its hit in its cast's frame
+    At(1, function() Cast(17364); Line("SPELL_DAMAGE"); Hit("nameplate1", 1) end)
+    Run(3)
+    Eq(#Decisions("show"), 1, "Stormstrike's own hit")
+    -- a tick's line on a mob where nothing of yours is known: as before
+    At(3.5, function() Line("SPELL_PERIODIC_DAMAGE"); Hit("nameplate2", 1) end)
+    Run(3.9)
+    Eq(#Decisions("show"), 2, "a tick with no spell of yours known on its mob")
+    -- a bleed of yours on the mob: its tick's line and hit
+    At(4, function() Cast(703) end)
+    At(7, function() Line("SPELL_PERIODIC_DAMAGE"); Hit("nameplate1", 1) end)
+    Run(9)
+    Eq(#Decisions("show"), 3, "the bleed's tick")
+    -- only a fire spell of yours on the other mob: a physical hit in its tick's frame isn't the tick
+    SIM.target = "nameplate2"
+    At(10, function() Cast(8050); Line("SPELL_DAMAGE"); Hit("nameplate2", 4) end)
+    At(13, function() Line("SPELL_PERIODIC_DAMAGE"); Hit("nameplate2", 1) end)
+    Run(15)
+    Eq(#Decisions("show"), 4, "Flame Shock's hit, not the physical one in its tick's frame")
+    -- with a pet out, its attacks are lines too
+    SIM.units.pet = {guid = "Pet-1", name = "Pet"}
+    At(20, function() Line("SPELL_DAMAGE"); Hit("nameplate2", 1) end)
+    Run(22)
+    Eq(#Decisions("show"), 5, "a hit with a line while your pet is out")
+end)
+
+------------------------------------------------------------------------
+-- (1.31.27) The same dungeon log, 25770.641: a groupmate's swing landed in the first Windfury
+-- slot just after the proc's first attack and took its second line; the second attack, 0.27 s
+-- later (25770.903), had none
+------------------------------------------------------------------------
+Test("Windfury: one attack a slot; a second hit just after the first isn't the proc's, two in one frame are", function()
+    NewGame(); Shaman(true); KnownSchools()
+    At(1, function() Swing(3.40); Line("SPELL_DAMAGE"); Line("SPELL_DAMAGE") end)
+    At(1.22, function() Hit() end)  -- the first attack
+    At(1.25, function() Hit() end)  -- a groupmate's hit in the same slot
+    At(1.49, function() Hit() end)  -- the second attack
+    Run(4)
+    local shown = Decisions("show")
+    Eq(Count(shown, "your extra attack (Windfury)"), 2, "two attacks shown")
+    Eq(Count(shown, "its line 0.22s before"), 1, "the first slot's")
+    Eq(Count(shown, "its line 0.49s before") + Count(shown, "its line 0.48s before"), 1, "and the second slot's")
+    Eq(Count(shown, "its line 0.25s before"), 0, "not the hit just after the first")
+    -- both attacks in one frame (the author's log, 0.479 / 0.479 s after the lines)
+    At(10, function() Swing(3.40); Line("SPELL_DAMAGE"); Line("SPELL_DAMAGE") end)
+    At(10.49, function() Hit(); Hit() end)
+    Run(14)
+    Eq(Count(Decisions("show"), "your extra attack (Windfury)"), 4, "both of a frame are the proc's")
+end)
+
+------------------------------------------------------------------------
 -- (1.31.24) The 2026-11-14 11:55 log with the game's file, 16400.804 and 16887.625: a Healing
 -- Wave with its 3.0 s cast bar; the game dropped "Maelstrom Ready!" at its end, Maelstrom Weapon
 -- stayed at 5 stacks and the next Lightning Bolt, 25 s later, was still instant

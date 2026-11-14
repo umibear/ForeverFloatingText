@@ -337,8 +337,13 @@ local function S(v) -- printable form of a maybe-secret value
 end
 -- (1.28.14) which hit a "show" / "drop" log line is about (its nameplate and moment): a swing's is
 -- decided up to a second later, and several hits are decided at once, in another order
+-- (1.31.25) and its school and kind: two hits on one nameplate in one moment, one shown and one
+-- dropped, were told apart by nothing (the author's 2026-11-14 14:18 dungeon log, 27050.045: a
+-- critical physical hit and a frost one, 37 such moments in that run)
 function FFT.Which(hit) -- (a field, not a local: the file is at Lua's limit of 200 locals)
-    return hit.unit and (" [%s %.3f]"):format(hit.unit, hit.at) or ""
+    if not hit.unit then return "" end
+    local kind = hit.crit and " CRITICAL" or hit.glancing and " GLANCING" or hit.blocked and " BLOCK_REDUCED" or ""
+    return (" [%s %.3f %s%s]"):format(hit.unit, hit.at, tostring(hit.school), kind)
 end
 
 -- times: seconds after a cast. Finds the period P that puts the most of them on whole
@@ -3079,6 +3084,64 @@ function FFT.SchoolPossible(p, school, m)
     return false
 end
 
+-- (1.31.26) The same for a physical hit: it takes a line in its own frame only while something
+-- physical of yours can be landing there. The author's 2026-11-14 14:18 dungeon log (5-man, the
+-- game's file beside it): 26473.111, Magma Totem's four lines for four mobs and two physical hits
+-- of a groupmate on the author's target in that frame: both shown, two of the totem's own fire
+-- hits dropped (the target's hits choose first); 30189.539, a groupmate's bleed in the frame of
+-- Lightning Bolt's line, shown as the bolt; 30462.418, a groupmate's swing alone with a totem's
+-- line. 12 of the 25 strangers' hits shown by a line of that frame in that run were such.
+-- Something physical of yours: a cast of yours that hits as physical or has no school learned
+-- (in its own moment on any mob, as an area attack; up to 0.2 s after it at its mob, where
+-- Windfury's hit comes; or sent and still on its way there), a swing of yours (in its own frame
+-- anywhere, up to 0.2 s after it at its mob, a shot within the flight window), a tick's line
+-- while such a spell of yours is on that mob (or none of yours is known there at all), a damage
+-- shield's own line, or a pet's or totem's
+-- attack that is physical or not learned (a pet out counts: its swings are lines too).
+-- Needs event colors.
+function FFT.PhysicalPossible(p, m)
+    if not clog.byEvent or m.shield then return true end
+    if m.periodic then
+        local any = false
+        for _, d in pairs(dots[p.plate] or {}) do
+            if p.now - d.t0 <= DOT_WATCH then
+                any = true
+                local known = SpellSchool(d.name)
+                if known == nil or known == 1 then return true end
+            end
+        end
+        -- no spell of yours known on that mob: one cast before a /reload (28058.577 in that log,
+        -- a bleed's tick 0.3 s after the reload) or put there by no cast of yours; as before
+        if not any then return true end
+    end
+    for _, c in ipairs(ownCasts) do
+        local known = SpellSchool(c.name)
+        if known == nil or known == 1 then
+            local dt = p.now - c.t
+            if dt >= -SAME_MOMENT and (dt <= SAME_MOMENT
+                or ((c.plate == nil or c.plate == p.plate)
+                    and (dt <= PROC_MAX or (dt <= FLIGHT_WINDOW and c.sent ~= false and not c.landed)))) then
+                return true
+            end
+        end
+    end
+    for _, sw in ipairs(swings) do
+        local dt = p.now - sw.t
+        if dt >= -SAME_FRAME and (dt <= SAME_FRAME or (sw.plate == p.plate and dt <= PROC_MAX)
+            or (sw.ranged and dt <= FLIGHT_WINDOW)) then
+            return true
+        end
+    end
+    for _, c in ipairs(minionCasts) do
+        local dt = p.now - c.t
+        local known = MinionSchool(c.id)
+        if (known == nil or known == 1) and dt >= -SAME_MOMENT and dt <= 1.5 then return true end
+    end
+    if not next(db.minionSchools or {}) and MinionCastLine(p.now) then return true end
+    local ok, pet = pcall(UnitExists, "pet")
+    return ok and Plain(pet) == true
+end
+
 local function ClogDecide(p)
     local lonely = p.alone and LinesInMoment(p.now, p.hit, p.plate) == 1
     local m, air = ClogFind(p.now, p.hit, p.plate)
@@ -3087,6 +3150,10 @@ local function ClogDecide(p)
     if m and not air and not m.shield and not p.hit.miss and p.hit.school and p.hit.school ~= 1
         and not FFT.SchoolPossible(p, p.hit.school, m) then
         if logging then Log("  school %d isn't one you are known to deal, and nothing of yours is unexplained now: no line for it", p.hit.school) end
+        m, air = ClogFind(p.now, p.hit, p.plate, true)
+        lonely = false
+    elseif m and not air and not p.hit.miss and p.hit.school == 1 and not FFT.PhysicalPossible(p, m) then
+        if logging then Log("  nothing physical of yours is landing now: no line for it") end
         m, air = ClogFind(p.now, p.hit, p.plate, true)
         lonely = false
     end
@@ -3536,6 +3603,17 @@ local function InSlot(gap, anims)
     return false
 end
 
+-- (1.31.27) The two attacks of one proc land a slot apart, or in one frame. The author's logs of
+-- 2026-11-14 with the game's file beside them (a 5-man dungeon run and three solo recordings),
+-- procs of two attacks whose two numbers are surely the author's: 146 of 151 one in each slot
+-- (0.27 s apart), 2 both in the second slot in one frame (0.479 / 0.479, 0.483 / 0.483), once
+-- 0.013 s apart (27200.625 / .638). In the dungeon a groupmate's hit in the first slot, just
+-- after the first attack, took the proc's second line 7 times, and the second attack, 0.27 s
+-- later, then had none. So a second hit within 0.10 s of the first, not in its frame, is no
+-- attack of that proc: a slot is 0.06 s wide, and a slower weapon's two attacks came 0.137 s
+-- apart (the 2026-11-10 19:58 log, solo: 0.365 and 0.502 s after the lines, three times).
+SWING_QUICK.SLOT_APART = 0.10
+
 -- A line of the proc at t, if one is left (its lines, less those a Windfury hit took), for a hit
 -- now. swingAt: the swing's moment when the lines came after its frame, else nil
 function SWING_QUICK.LineIn(now, t, swingAt, anims)
@@ -3543,7 +3621,13 @@ function SWING_QUICK.LineIn(now, t, swingAt, anims)
     if not n then return nil end
     local taken = 0
     for _, m in ipairs(clogMsgs) do
-        if m.extra and math.abs(m.t - t) <= SAME_FRAME then taken = taken + 1 end
+        if m.extra and math.abs(m.t - t) <= SAME_FRAME then
+            taken = taken + 1
+            -- (1.31.27) one attack a slot: a proc's second number comes in the first one's frame or
+            -- a slot later, never just after it (SWING_QUICK.SLOT_APART)
+            local gap = m.extraAt and now - m.extraAt
+            if gap and gap > SAME_FRAME and gap < SWING_QUICK.SLOT_APART then return nil end
+        end
     end
     if n - taken <= 0 then return nil end
     for _, m in ipairs(clogMsgs) do
@@ -3705,7 +3789,7 @@ local function ClogHit(plate, hit, now)
     end
     local xm, of, from = ExtraAttackLine(plate, hit, now)
     if xm then
-        xm.used, xm.extra = true, true
+        xm.used, xm.extra, xm.extraAt = true, true, now
         -- which moment this proc's hits are timed from, for the swing's own hit (SwingFor)
         if from == "swing" then of.hitsFromSwing = (of.hitsFromSwing or 0) + 1
         elseif from == "lines" then of.hitsFromLines = (of.hitsFromLines or 0) + 1 end
