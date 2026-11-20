@@ -2629,14 +2629,18 @@ end
 -- instant Lightning Bolt cast in the frame of a Flame Shock tick; the tick's hit marked the bolt
 -- landed, so the bolt's own Nature hit (183317.464, its line 0.047 s before) found nothing in the
 -- air and was dropped.
-local function MarkLanded(school, now)
+-- (1.31.31) momentOnly: the hit came in the frame of your pet's or totem's own attack of its
+-- school, so it says nothing about a spell of yours cast earlier. A hunter's 2026-11-20 16:48
+-- log: the pet's Claw (its cast, line and hit in one frame, 17817.796) marked Summon Hawk, cast
+-- 0.79 s before, as landed; the hawk's own hit came 0.24 s later (17818.039).
+local function MarkLanded(school, now, momentOnly)
     for _, c in ipairs(ownCasts) do
         if not c.landed and math.abs(now - c.t) <= SAME_MOMENT then
             local known = SpellSchool(c.name)
             if not (school and known and known ~= school) then c.landed = true; return end
         end
     end
-    if not school then return end
+    if not school or momentOnly then return end
     for _, c in ipairs(ownCasts) do
         local dt = now - c.t
         if not c.landed and dt > SAME_MOMENT and dt <= FLIGHT_WINDOW and SpellSchool(c.name) == school then
@@ -3033,6 +3037,55 @@ function FFT.UnlearnedFlight(p)
     return line, cast
 end
 
+-- (1.31.31) A physical spell whose hit comes long after its cast. A physical hit takes a line of
+-- its own frame only (a line from before needs something of yours of another school on its way:
+-- physical hits are the most common, and any stranger's would take it). A hunter's 2026-11-20
+-- 16:48 log (alone): Summon Hawk, cast at the mob and learned physical, brings one spell-damage
+-- line 0.95-1.03 s after the cast and its hit in that line's frame once (17832.805, shown) and
+-- 0.024 / 0.075 / 0.103 s after it three times (17840.659, 17809.317, 17818.039: all dropped).
+-- So, outside a group as above: a physical hit takes the one unused damage line of yours (not a
+-- tick's) from up to 0.15 s before it, while a spell you sent at that mob, learned to hit as
+-- physical, hasn't landed, and the line came after that cast's own moment (a line in the cast's
+-- moment is an instant hit's or a proc's, whose hits come otherwise).
+-- A shot (Auto Shot: a ranged PLAYER_SWING, its repeats come with no UNIT_SPELLCAST_SENT) counts
+-- as such a spell: in that log its line came 0.63-0.73 s after the shot, with its hit 12 times,
+-- and 0.015 / 0.029 / 0.066 s before it three times (17844.896, shown as the pet's swing;
+-- 17805.982, a stranger's nature hit in the line's frame shown instead; 17837.825, dropped).
+-- Returns the line and the cast or shot (the oldest such), or nil.
+SWING_QUICK.PHYS_LINE_BEFORE = 0.15
+function FFT.PhysicalFlight(p)
+    if p.hit.miss or p.hit.school ~= 1 or not clog.byEvent or IsInGroup() then return nil end
+    local cast
+    for _, c in ipairs(ownCasts) do
+        local dt = p.now - c.t
+        if not c.landed and c.sent ~= false and c.plate == p.plate and dt > SAME_MOMENT and dt <= FLIGHT_WINDOW
+            and SpellSchool(c.name) == 1 then
+            cast = c
+            break
+        end
+    end
+    if not cast then
+        for _, sw in ipairs(swings) do
+            local dt = p.now - sw.t
+            if sw.ranged and not sw.landed and sw.plate == p.plate and dt > SAME_MOMENT and dt <= SHOT_LATE then
+                cast = sw
+                break
+            end
+        end
+    end
+    if not cast then return nil end
+    local line, lines = nil, 0
+    for _, m in ipairs(clogMsgs) do
+        local before = p.now - m.t
+        if not m.used and m.kind == "damage" and not m.periodic and before > SAME_FRAME
+            and before <= SWING_QUICK.PHYS_LINE_BEFORE and m.t > cast.t + SAME_MOMENT then
+            lines, line = lines + 1, m
+        end
+    end
+    if lines ~= 1 then return nil end
+    return line, cast
+end
+
 -- (1.31.23) A hit of a school you aren't known to deal takes no line of yours. The author's
 -- 2026-11-14 11:55 log (solo, the game's file beside it; a paladin fighting the same mobs):
 -- 16554.234, the paladin's Holy Strike crit on one mob in the very frame of the author's two
@@ -3180,7 +3233,11 @@ local function ClogDecide(p)
             if not ownNow and school then VoteMinion(p.plate, p.hit, p.now) end
             totem = SWING_QUICK.TotemHit(p, m) -- before MarkLanded: a cast still on its way counts
             if not totem then FFT.SchoolFromLine(p, m, lonely) end -- (1.31.16) before MarkLanded too
-            MarkLanded(school, p.now)
+            local minionsOwn = false -- (1.31.31) your pet's or totem's attack of this school in the hit's frame
+            for _, c in ipairs(minionCasts) do
+                if school and math.abs(p.now - c.t) <= SAME_FRAME and MinionSchool(c.id) == school then minionsOwn = true end
+            end
+            MarkLanded(school, p.now, minionsOwn)
             LearnFromLine(p.plate, p.hit, p.now, m) -- (1.21.0) facts for the fallback
         end
         if totem then FFT.Recolor(p.hit, false) end -- (1.31.19) Windfury's: the physical color
@@ -3199,6 +3256,13 @@ local function ClogDecide(p)
         FFT.VoteSchool(uc, p.hit.school, "its line before its hit, outside a group")
         return ShowClogHit(p, ("your Combat Log line, %+.3fs, while your %s was on its way (its school not learned yet)")
             :format(um.t - p.now, uc.name))
+    end
+    -- (1.31.31) outside a group: your physical spell on its way to this mob, its line just before
+    local pm, pc = FFT.PhysicalFlight(p)
+    if pm then
+        pm.used, pc.landed = true, true
+        return ShowClogHit(p, ("your Combat Log line, %+.3fs, while your %s was on its way"):format(pm.t - p.now,
+            pc.name or "shot"))
     end
     -- (1.17.0) a line from long before: a shot's from its frame, or a melee line
     -- of your pet's or an extra attack of yours
@@ -3541,10 +3605,32 @@ local function ProcLinesAt(t, now)
     return math.max(0, k - math.max(0, TotemLinesOwed(t, now) - paid))
 end
 
+-- (1.31.30) Windfury Weapon is a shaman's enchant: on a character the game names as another class
+-- no line is a Windfury proc's. Until now only the totem's rules and the killing swing's asked the
+-- class, so on any class an unused damage line in the frame of a swing or of a physical cast,
+-- with a physical hit 0.23 or 0.50 s after it, was shown as "your extra attack (Windfury)" with
+-- "Windfury!", and that swing then waited 0.96 s for its own hit. A hunter's 2026-11-20 16:48 log
+-- (alone, 1.31.27), 17841.120: his Auto Shot's hit, 0.485 s after the shot and with its own line in
+-- its frame, took a line left in the shot's frame by his summoned hawk's attack (whose hit came a
+-- frame later) and was shown with "Windfury!". Replayed: now shown by its own line, no alert, no
+-- other decision changed. Asked once the class reads; where the game gives none, as before.
+function SWING_QUICK.NoWindfury()
+    local no = SWING_QUICK.noWindfury
+    if no == nil then
+        local ok, _, class = pcall(UnitClass, "player")
+        class = ok and Plain(class)
+        if type(class) ~= "string" then return false end
+        no = class ~= "SHAMAN"
+        SWING_QUICK.noWindfury = no
+    end
+    return no
+end
+
 -- Is this swing a Windfury proc's? The proc's moment, or nil. Once its frames are over.
 SwingProc = function(sw, now)
     if sw.procAt then return sw.procAt end
     if sw.procAt == false or not clog.byEvent or sw.ranged then return nil end
+    if SWING_QUICK.NoWindfury() then sw.procAt = false; return nil end
     for _, m in ipairs(clogMsgs) do
         local after = m.t - sw.t
         -- from before the swing only a line a Windfury hit has taken: an unused line there may be
@@ -3654,6 +3740,7 @@ end
 local function ExtraAttackLine(plate, hit, now)
     -- (1.30.8) a glancing hit is a white swing's, never a Windfury attack's (see KindFits)
     if hit.miss or hit.glancing or hit.school ~= 1 or not clog.byEvent then return nil end -- needs event colors
+    if SWING_QUICK.NoWindfury() then return nil end -- (1.31.30) another class has no Windfury Weapon
     -- Slots measured from the swing (or the cast) double the moments a stranger's hit can take a
     -- line. Simulator, 10 fights each, with and without them: solo your hits shown 98.9% -> 99.3%
     -- and nothing wrong; with 5 others +8 of yours for +13 of theirs, with 39 others -10 of yours

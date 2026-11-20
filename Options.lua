@@ -308,8 +308,10 @@ function ns.CreateOptions(FFT)
         .. "Also the game's own reactive notices (\"<Overpower>\"), kept 5 seconds: the game keeps their name "
         .. "hidden and doesn't say when they end. The game's own text for them is hidden meanwhile.", ApplyBlizzard)
     Checkbox("showAlerts", "Show highlighted spells",
-        "Spells the game lights up for you, such as Overpower or Clearcasting: \"Clearcasting!\", kept until "
-        .. "the game turns the highlight off.")
+        "Spells the game lights up for you, such as Overpower: \"Overpower!\", kept until the game turns the "
+        .. "highlight off. Also \"Clearcasting!\" (shaman, druid, mage), which the game doesn't light up: "
+        .. "an alert that scrolls by, as \"Windfury!\" does, when its buff can be read or two different "
+        .. "spells you cast for mana cost none.")
     Checkbox("showCrowdControl", "Show crowd control on you",
         "\"Stunned\", \"Silenced\", \"Shadow Locked\" and the like, in the game's own words, kept while it lasts. "
         .. "Off by default: the game shows it already, with its icon, in the middle of the screen. "

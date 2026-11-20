@@ -507,6 +507,183 @@ usable:SetScript("OnEvent", function()
     C_Timer.After(0, LookUsable)
 end)
 
+------------------------------------------------------------------------
+-- (1.31.28) Clearcasting (a talent's proc: your next damage or healing spell costs no mana). The
+-- game lights nothing up for it and sends no proc notice. The author's 2026-11-17 19:38 log with
+-- the game's file: "Clearcasting" 16246 applied with an Earth Shock (289039.963), used by a Flame
+-- Shock 11.9 s later (289051.857); the addon got a hidden buff gain (the feed's SPELL_AURA_START,
+-- UNIT_AURA) and a hidden removal, no SPELL_CAST, no overlay, no button glow. A buff's name can't
+-- be read in a fight, so it is looked for in the two ways the game's API docs leave open:
+--  - its buff by spell ID, while the game says this one isn't hidden (C_Secrets.ShouldSpellAuraBeSecret;
+--    SecretPredicatesDocumentation.lua, SecretWhenUnitAuraRestricted: "Individual spells may be
+--    flagged as never or always secret"), which out of combat it isn't;
+--  - spells you cast for mana now costing none (C_Spell.GetSpellPowerCost: no secrecy flag,
+--    SpellDocumentation.lua).
+-- Neither is in a log yet with the proc up: while recording, each change in what the two say is logged.
+-- "Clearcasting!" once as either starts saying so (the buff first).
+-- (1.31.29) An alert that scrolls by at the alerts spot, as "Windfury!" does, not a row kept at
+-- the procs spot while it lasts: the author, 2026-11-18, a shaman spends it on the next spell
+-- whichever that is, so there is nothing to wait for (1.31.28 kept it up to 30 s).
+-- (1.31.30) The cost reading needs two spells of different names at no cost. One alone can be
+-- another proc's: the author's 2026-11-20 16:07 log with the game's file, "Clearcasting!" twice
+-- (159725.558, 159742.661), each in the frame of the game's "Maelstrom Ready!" notice with
+-- "Lightning Bolt 0, was 215" and no Clearcasting in the file. In the game's files of 12 earlier
+-- recordings every Lightning Bolt cast with Maelstrom Ready! up cost no mana (271 of 271) and no
+-- other spell did (Earth Shock 31, Stormstrike 60, Healing Wave 5, Lesser Healing Wave 4, all at
+-- full cost). So the game does report a proc's free cast in a fight, and Clearcasting, which any
+-- damage or healing spell uses up, should read as several spells free at once (not yet in a log).
+------------------------------------------------------------------------
+local CLEARCASTING = 16246 -- the shaman's in the game's file; a druid's there is 16870
+local CLEARCAST_BY_CLASS = {SHAMAN = 16246, DRUID = 16870, MAGE = 12536}
+local COST_SPELLS = 6      -- the spells last cast whose mana cost is watched
+local clear = {spells = {}} -- spells: {id, name, max = the highest mana cost read}, newest first
+
+-- Your class's Clearcasting: its spell ID and name; false for a class without one, nil while the
+-- class isn't known. An ID counts only when the game gives it the name it gives 16246.
+local function ClearSpell()
+    if clear.id ~= nil then return clear.id, clear.name end
+    local class = Plain(UnitClass and select(2, UnitClass("player")))
+    if type(class) ~= "string" then return nil end
+    local id = CLEARCAST_BY_CLASS[class] or false
+    local name = id and Plain(C_Spell.GetSpellName(id))
+    if type(name) ~= "string" or name ~= Plain(C_Spell.GetSpellName(CLEARCASTING)) then id, name = false, nil end
+    clear.id, clear.name = id, name
+    return id, name
+end
+
+-- Whether the game hides this buff from addons now: true / false, nil when it doesn't say
+local function ClearHidden(id)
+    local secrets = C_Secrets
+    local ask = secrets and (secrets.ShouldSpellAuraBeSecret or secrets.ShouldAurasBeSecret)
+    if not ask then return nil end
+    local ok, hidden = pcall(ask, id)
+    hidden = ok and Plain(hidden)
+    if type(hidden) ~= "boolean" then return nil end
+    return hidden
+end
+-- The buff on you: true / false while the game lets it be read, nil while it doesn't
+local function ClearAura(id)
+    if not (C_UnitAuras and C_UnitAuras.GetPlayerAuraBySpellID) then return nil end
+    if C_Secrets and ClearHidden(id) ~= false then return nil end
+    local ok, a = pcall(C_UnitAuras.GetPlayerAuraBySpellID, id)
+    if not ok or IsSecret(a) then return nil end
+    return type(a) == "table"
+end
+
+-- A spell's mana cost now, or nil when the game gives none (a cost that needs a form you aren't in
+-- isn't one)
+local function ManaCost(id)
+    if not (C_Spell and C_Spell.GetSpellPowerCost) then return nil end
+    local ok, cost = pcall(function()
+        local costs = C_Spell.GetSpellPowerCost(id)
+        if IsSecret(costs) or type(costs) ~= "table" then return nil end
+        local mana = Enum and Enum.PowerType and Enum.PowerType.Mana or 0
+        for _, c in pairs(costs) do
+            if not IsSecret(c) and type(c) == "table" and Plain(c.type) == mana then
+                local needs = Plain(c.requiredAuraID)
+                if not (type(needs) == "number" and needs ~= 0 and Plain(c.hasRequiredAura) == false) then
+                    return Plain(c.cost)
+                end
+            end
+        end
+    end)
+    if ok and type(cost) == "number" then return cost end
+end
+-- true (and the two spells) when two spells of different names that cost mana cost none now;
+-- false (and the spell, if one) when one alone does or those watched all cost mana; nil when
+-- nothing says. Two ranks of one spell are one spell: a proc that frees it frees both.
+local function FreeCast()
+    local free, second, costly
+    for _, s in ipairs(clear.spells) do
+        local cost = ManaCost(s.id)
+        if cost and cost > 0 then
+            costly = true
+            if not s.max or cost > s.max then s.max = cost end
+        elseif cost == 0 and s.max then
+            if not free then free = s
+            elseif not second and s.name ~= free.name then second = s end
+        end
+    end
+    if second then return true, free, second end
+    if free or costly then return false, free end
+    return nil
+end
+
+local function ClearLook()
+    local db = FFT.db
+    local id, name = ClearSpell()
+    if not id then return end
+    local byAura = ClearAura(id)
+    local free, spell, second = FreeCast()
+    if ns.IsLogging and ns.IsLogging() then
+        local what = ""
+        if spell then
+            what = (" (%s 0, was %s; %s)"):format(spell.name, tostring(spell.max),
+                second and ("%s 0, was %s"):format(second.name, tostring(second.max)) or "one spell alone: not told")
+        end
+        local line = ("%s: its buff (%s) hidden by the game %s, on you %s; two watched spells cost no mana %s%s"):format(
+            name, tostring(id), tostring(ClearHidden(id)), tostring(byAura), tostring(free), what)
+        if line ~= clear.logged then
+            clear.logged = line
+            Log("%s", line)
+        end
+    end
+    local up = byAura
+    if up == nil then up = free end
+    if up == nil then return end
+    if not up then
+        clear.state = nil
+    elseif not clear.state then
+        if not (db and db.enabled and db.showAlerts and FFT.ShowAlert) then return end
+        clear.state = "up" -- said once: not again until it reads as gone
+        Log("%s alert shown", name)
+        FFT:ShowAlert(name .. "!")
+    end
+end
+-- one look at the end of the frame, and one a moment later (a cost may change after its buff)
+local function ClearSoon()
+    if not clear.pending then
+        clear.pending = true
+        C_Timer.After(0, function() clear.pending = false; ClearLook() end)
+    end
+    if not clear.again then
+        clear.again = true
+        C_Timer.After(0.25, function() clear.again = false; ClearLook() end)
+    end
+end
+
+local clearWatch = CreateFrame("Frame")
+clearWatch:RegisterUnitEvent("UNIT_AURA", "player")
+clearWatch:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
+clearWatch:RegisterEvent("PLAYER_REGEN_ENABLED")
+clearWatch:SetScript("OnEvent", function(_, event, _, _, a3)
+    local id = ClearSpell()
+    if id == false then -- a class without it: nothing to listen for
+        clearWatch:UnregisterEvent("UNIT_AURA")
+        clearWatch:UnregisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+        clearWatch:UnregisterEvent("PLAYER_REGEN_ENABLED")
+        return
+    end
+    if not id then return end
+    if event == "PLAYER_REGEN_ENABLED" then
+        C_Timer.After(0.5, ClearLook) -- your buffs are readable again (as Alerts.lua reads them)
+        return
+    end
+    if event == "UNIT_SPELLCAST_SUCCEEDED" then
+        local spell = Plain(a3)
+        if type(spell) ~= "number" then return end
+        if not (Plain(C_Spell.IsSpellHarmful(spell)) or Plain(C_Spell.IsSpellHelpful(spell))) then return end
+        local known
+        for i, s in ipairs(clear.spells) do
+            if s.id == spell then known = table.remove(clear.spells, i) break end
+        end
+        local name = Plain(C_Spell.GetSpellName(spell))
+        table.insert(clear.spells, 1, known or {id = spell, name = type(name) == "string" and name or tostring(spell)})
+        clear.spells[COST_SPELLS + 1] = nil
+    end
+    ClearSoon()
+end)
+
 function FFT:TestProcs()
     C_Timer.After(0.2, function() FFT:ProcShow("game", FFT.Color("colorProc"), "Maelstrom Ready!", nil, nil, 4) end)
     C_Timer.After(0.8, function() FFT:ProcShow("stormstrike", FFT.Color("colorStormstrike"), "Stormstrike!", nil, nil, 3) end)

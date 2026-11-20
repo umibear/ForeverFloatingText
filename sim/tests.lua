@@ -1823,6 +1823,25 @@ Test("Windfury Totem: not for another class, not an off-hand swing", function()
     UnitClass = nil
 end)
 
+-- (1.31.30) Windfury Weapon is a shaman's: a hunter's 2026-11-20 16:48 log, 17841.120, "Windfury!"
+-- with his Auto Shot's hit 0.485 s after a line left in the shot's frame. The proc's own rule was
+-- the one Windfury rule that didn't ask the class.
+Test("another class has no Windfury Weapon: unused lines with its swing or cast are no proc", function()
+    NewGame()
+    UnitClass = function() return "Hunter", "HUNTER", 3 end
+    At(1, function() Swing(); Line("SPELL_DAMAGE"); Line("SPELL_DAMAGE") end)
+    At(1.228, function() Hit() end) -- where a Windfury attack would land
+    At(1.461, function() Hit() end) -- the swing's own, at its usual delay
+    At(5, function() Cast(17364); Line("SPELL_DAMAGE"); Hit(); Line("SPELL_DAMAGE") end) -- a physical instant
+    At(5.505, function() Hit() end)
+    Run(7)
+    Eq(Count(Decisions("show"), "your extra attack (Windfury)"), 0, "no hit shown as a Windfury attack")
+    Eq(WindfuryAlerts(), 0, "no alert")
+    Eq(Count(Decisions("show"), "(your swing, 0.4"), 1, "the swing doesn't wait for a proc: its hit at 0.46 s")
+    Eq(Count(Decisions("show"), "later as your Windfury"), 0, "nor is any swing delayed by one")
+    UnitClass = nil
+end)
+
 -- (1.30.7) the late hit in a group too: 2026-11-11 16:33 log, 31166.195 (+1.463; the warrior's own +1.580)
 Test("Windfury Totem in a group: the late hit is the extra swing's, a stranger's 0.50 s after it isn't yours", function()
     NewGame(); Shaman(true)
@@ -2531,6 +2550,126 @@ Test("a class with no reactive ability stops listening for them, with no error",
     Eq(Listening("SPELL_UPDATE_USABLE"), 0, "nor to usable updates")
 end)
 
+-- (1.31.28) Clearcasting: the game lights nothing up for it and sends no proc notice (the author's
+-- 2026-11-17 19:38 log: gained with an Earth Shock at 289039.963, used by a Flame Shock 11.9 s later)
+local function Costs(t) -- spell ID -> mana cost, as C_Spell.GetSpellPowerCost gives it
+    C_Spell.GetSpellPowerCost = function(id)
+        if t[id] == nil then return nil end
+        return {{type = 0, name = "MANA", cost = t[id], minCost = t[id], requiredAuraID = 0, hasRequiredAura = false}}
+    end
+end
+local function ClearAlerts() -- "Clearcasting!" alerts so far
+    local n = 0
+    for _, s in ipairs(Shown("alerts")) do if s.text == "Clearcasting!" then n = n + 1 end end
+    return n
+end
+Test("\"Clearcasting!\" scrolls by once per proc, when two spells you cast for mana cost none", function()
+    NewGame()
+    Shaman()
+    SIM.spells[16246] = {name = "Clearcasting"}
+    SIM.spells[10447] = {name = "Flame Shock", harmful = true}
+    local cost = {[8042] = 105, [10447] = 160, [133] = 60}
+    Costs(cost)
+    At(1, function() Cast(8042) end) -- an Earth Shock: its cost is known from here on
+    At(1.2, function() Cast(10447) end) -- a Flame Shock: its cost too
+    At(1.5, function() Cast(133) end) -- a spell that keeps its cost all along
+    Run(2)
+    Eq(ClearAlerts(), 0, "nothing yet")
+    At(3, function() cost[8042], cost[10447] = 0, 0; Cast(8042); HiddenAdd() end) -- the proc, with an Earth Shock
+    Run(4)
+    Eq(ClearAlerts(), 1, "an alert, as Windfury's")
+    Eq(ProcsUp(), "", "not a row kept at the procs spot")
+    At(5, function() HiddenAdd() end) -- another buff of yours, the proc still on you: not said again
+    Run(9)
+    Eq(ClearAlerts(), 1, "said once")
+    At(15, function() cost[8042], cost[10447] = 105, 160; Cast(10447); HiddenRemove() end) -- used by a Flame Shock
+    At(20, function() cost[8042], cost[10447] = 0, 0; HiddenAdd() end) -- the next proc
+    At(21, function() cost[8042], cost[10447] = 105, 160; Cast(8042); HiddenRemove() end)
+    Run(22)
+    Eq(ClearAlerts(), 2, "one alert a proc")
+end)
+
+-- (1.31.30) the author's 2026-11-20 16:07 log: "Clearcasting!" at 159725.558 and 159742.661, each in
+-- the frame of the game's "Maelstrom Ready!" notice, "Lightning Bolt 0, was 215", no Clearcasting
+-- in the game's file. That proc frees Lightning Bolt alone (271 of 271 casts in 12 game files).
+Test("one spell alone at no cost is another proc's, not Clearcasting; two ranks of it are one spell", function()
+    NewGame()
+    Shaman()
+    SIM.spells[16246] = {name = "Clearcasting"}
+    SIM.spells[15208] = {name = "Lightning Bolt", harmful = true}
+    SIM.spells[10392] = {name = "Lightning Bolt", harmful = true} -- a lower rank
+    local cost = {[8042] = 105, [15208] = 215, [10392] = 170}
+    Costs(cost)
+    At(1, function() Cast(8042) end)
+    At(1.2, function() Cast(15208) end)
+    At(1.4, function() Cast(10392) end)
+    At(3, function() cost[15208], cost[10392] = 0, 0; HiddenAdd() end) -- "Maelstrom Ready!": Lightning Bolt is free
+    Run(4)
+    Eq(ClearAlerts(), 0, "Lightning Bolt alone, whatever its rank: not Clearcasting")
+    At(5, function() cost[15208], cost[10392] = 215, 170; Cast(15208); HiddenRemove() end) -- used
+    At(8, function() cost[15208], cost[8042] = 0, 0; HiddenAdd() end) -- Clearcasting: every spell is free
+    Run(9)
+    Eq(ClearAlerts(), 1, "two different spells free: Clearcasting")
+end)
+
+Test("Clearcasting isn't told from a spell never seen to cost mana, nor with highlighted spells off", function()
+    NewGame()
+    Shaman()
+    SIM.spells[16246] = {name = "Clearcasting"}
+    local cost = {[8042] = 0}
+    Costs(cost)
+    At(1, function() Cast(8042); HiddenAdd() end)
+    Run(2)
+    Eq(ClearAlerts(), 0, "free from the first look: that says nothing")
+    At(3, function() cost[8042] = 105; Cast(8042) end)
+    At(5, function() G.FFT.db.showAlerts = false; cost[8042] = 0; HiddenAdd() end)
+    Run(6)
+    Eq(ClearAlerts(), 0, "off: not shown")
+    -- a cost the game doesn't give (no table, or a hidden one) says nothing either
+    At(7, function() G.FFT.db.showAlerts = true; cost[8042] = nil; HiddenAdd() end)
+    Run(8)
+    Eq(ClearAlerts(), 0, "no cost given: not shown")
+    At(9, function() C_Spell.GetSpellPowerCost = function() return SIM.Secret({}) end; HiddenAdd() end)
+    Run(10)
+    Eq(ClearAlerts(), 0, "a hidden cost: not shown")
+end)
+
+Test("Clearcasting by its buff where the game doesn't hide that one; a hidden buff isn't asked for", function()
+    NewGame()
+    Shaman()
+    SIM.spells[16246] = {name = "Clearcasting"}
+    local s = {hidden = false, on = false, asked = 0}
+    C_Secrets = {ShouldSpellAuraBeSecret = function() return s.hidden end, ShouldAurasBeSecret = function() return true end}
+    C_UnitAuras = {GetAuraDataByIndex = function() end, GetPlayerAuraBySpellID = function(id)
+        s.asked = s.asked + 1
+        if id == 16246 and s.on then return {spellId = id, name = "Clearcasting"} end
+    end}
+    At(1, function() s.on = true; HiddenAdd() end)
+    Run(2)
+    Eq(ClearAlerts(), 1, "its buff read in a fight: an alert")
+    At(3, function() s.on = false; HiddenRemove() end)
+    At(5, function() s.hidden, s.on, s.asked = true, true, 0; HiddenAdd() end)
+    Run(6)
+    Eq(ClearAlerts(), 1, "hidden: nothing shown")
+    Eq(s.asked, 0, "and its buff not asked for")
+    -- after the fight your buffs are readable: found then
+    At(7, function() s.hidden = false; SIM.Fire("PLAYER_REGEN_ENABLED") end)
+    Run(8)
+    Eq(ClearAlerts(), 2, "found once readable")
+    C_Secrets, C_UnitAuras = nil, nil
+end)
+
+Test("a class without Clearcasting doesn't watch for it", function()
+    NewGame()
+    UnitClass = function() return "Warrior", "WARRIOR", 1 end
+    SIM.spells[16246] = {name = "Clearcasting"}
+    local auras = Listening("UNIT_AURA")
+    HiddenAdd()
+    Run(1)
+    Eq(Listening("UNIT_AURA"), auras - 1, "stopped listening to your buffs for it")
+    Eq(ProcsUp(), "", "nothing shown")
+end)
+
 -- kept last: it leaves C_SpellBook behind (the stub has none)
 Test("without Stormstrike its resets aren't watched; learning it, or casting it, watches again", function()
     NewGame()
@@ -2810,6 +2949,77 @@ Test("a flying spell with no school learned: its hit after its line is yours out
     Bolt(17)
     Run(20)
     Eq(Count(Decisions("show"), "while your Fireball was on its way)"), 1, "in a group, shown once learned")
+end)
+
+-- (1.31.31) a hunter's 2026-11-20 16:48 log (alone): Summon Hawk, learned physical, its line
+-- 0.95-1.03 s after the cast and its hit 0.024 / 0.075 / 0.103 s after the line (17840.659,
+-- 17809.317, 17818.039), each dropped: a physical hit took a line of its own frame only
+local function Hunter()
+    UnitClass = function() return "Hunter", "HUNTER", 3 end
+    SIM.spells[1513] = {name = "Summon Hawk", harmful = true}
+    ForeverFloatingTextDB.spellSchools = {["Summon Hawk"] = 1}
+end
+Test("a physical spell on its way: its hit just after its line is yours outside a group", function()
+    NewGame()
+    Hunter()
+    local function Hawk(t, gap)
+        At(t, function() Cast(1513) end)
+        At(t + 1.0, function() Line("SPELL_DAMAGE") end)
+        At(t + 1.0 + gap, function() Hit() end)
+    end
+    Hawk(1, 0.075) -- in a group: can't be told from a stranger's
+    Run(4)
+    Eq(#Decisions("show"), 0, "in a group, dropped")
+    SIM.inGroup = false
+    Hawk(5, 0.024); Hawk(9, 0.103)
+    Run(12)
+    Eq(Count(Decisions("show"), "while your Summon Hawk was on its way)"), 2, "outside a group, shown")
+    Hawk(13, 0.3) -- long after its line
+    At(17, function() Cast(1513) end)
+    At(18, function() Line("SPELL_DAMAGE"); Line("SPELL_DAMAGE") end) -- two lines waiting
+    At(18.05, function() Hit() end)
+    Run(20)
+    Eq(Count(Decisions("show"), "while your Summon Hawk was on its way)"), 2, "0.3 s after its line, or with two lines: dropped")
+    UnitClass = nil
+end)
+
+-- 17817.796 there: the pet's Claw 0.79 s after the Summon Hawk cast marked the hawk as landed
+Test("your pet's attack in its own frame doesn't land a spell of yours that is on its way", function()
+    NewGame()
+    Hunter()
+    SIM.inGroup = false
+    SIM.spells[16832] = {name = "Claw", harmful = true}
+    SIM.AddUnit("pet", {guid = "Pet-0-1-1-1-1-pet", name = "Pet", enemy = false, owned = true})
+    ForeverFloatingTextDB.minionSchools = {[16832] = 1}
+    At(1, function() Cast(1513) end)
+    At(1.8, function() -- the pet's Claw: its cast, line and hit in one frame
+        SIM.Fire("UNIT_SPELLCAST_SUCCEEDED", "pet", "Cast-4-0-0-16832-1", 16832)
+        Line("SPELL_CAST_SUCCESS"); Line("SPELL_DAMAGE"); Hit()
+    end)
+    At(2.0, function() Line("SPELL_DAMAGE") end)
+    At(2.1, function() Hit() end)
+    Run(4)
+    Eq(Count(Decisions("show"), "(your Combat Log line, +0.000s)"), 1, "the pet's Claw, by its line")
+    Eq(Count(Decisions("show"), "while your Summon Hawk was on its way)"), 1, "and the hawk's hit after it")
+    UnitClass = nil
+end)
+
+-- 17837.825 there: an Auto Shot's line 0.35 s after the shot, its hit 0.066 s after the line
+Test("a shot's hit just after its line is yours outside a group", function()
+    NewGame()
+    Hunter()
+    At(1, function() SIM.Fire("PLAYER_SWING", 2.12, 2) end)
+    At(1.7, function() Line("SPELL_DAMAGE") end)
+    At(1.766, function() Hit() end)
+    Run(3)
+    Eq(#Decisions("show"), 0, "in a group, dropped")
+    SIM.inGroup = false
+    At(5, function() SIM.Fire("PLAYER_SWING", 2.12, 2) end)
+    At(5.7, function() Line("SPELL_DAMAGE") end)
+    At(5.766, function() Hit() end)
+    Run(8)
+    Eq(Count(Decisions("show"), "while your shot was on its way)"), 1, "outside a group, shown")
+    UnitClass = nil
 end)
 
 Test("outside a group an unlearned spell on its way takes no physical hit, nor a hit with two lines waiting", function()

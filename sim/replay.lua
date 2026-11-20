@@ -125,6 +125,14 @@ local noSentAt = {} -- spell name -> the timestamp of its last "came with no" li
 -- "DEC" lines at the end of the report say what was decided for each (to compare with the game's
 -- combat log file, which says whose each hit was)
 local origOf = {}
+-- (1.31.31) a recording with a pet's casts in it: the pet is out from the start
+for i = first + 1, last do
+    local petName = all[i]:match("^%d+%.%d+ your minion pet cast (.-)'s ")
+    if petName then
+        SIM.AddUnit("pet", {guid = "Pet-0-1-1-1-1-pet", name = petName, enemy = false, owned = true})
+        break
+    end
+end
 local t0, lastAt = nil, 0
 local before = {show = 0, drop = 0, hits = 0}
 local castN = 0
@@ -141,12 +149,15 @@ for i = first + 1, last do
         local mUnit, mName = rest:match("^your minion (nameplate%d+): (.+)$")
         if mUnit then At(function() Minion(mUnit, mName) end) end
         local cUnit, cName, cId = rest:match("^your minion (nameplate%d+) cast (.-) %(id (%d+)")
+        -- (1.31.31) a pet's attacks too ("your minion pet cast <its name>'s Claw (id 16832, ..."):
+        -- a hunter's 2026-11-20 16:48 log replayed 57 hits shown where the game showed 79
+        if not cUnit then cUnit, cName, cId = rest:match("^your minion (pet) cast (.-) %(id (%d+)") end
         if cUnit then
             local id = tonumber(cId)
             SIM.spells[id] = SIM.spells[id] or {name = cName:match("'s (.+)$") or cName, harmful = true}
             At(function()
                 local u = SIM.units[cUnit]
-                if not (u and u.owned) then Minion(cUnit, "totem") end
+                if not (u and u.owned) and cUnit ~= "pet" then Minion(cUnit, "totem") end
                 castN = castN + 1
                 SIM.Fire("UNIT_SPELLCAST_SUCCEEDED", cUnit, "Cast-3-0-0-" .. id .. "-" .. castN, id)
             end)
