@@ -715,11 +715,23 @@ local function ClearLook()
     if not id then return end
     local byAura = ClearAura(id)
     local free, spell, second = FreeCast()
+    -- (1.31.34) One watched spell alone at no cost: the spell the game's proc frees, once learned,
+    -- is asked by its ID as the second spell, watched or not. The author's 2026-11-22 18:29 log
+    -- with the game's file, 135034.591: Clearcasting came with a Fire Nova, "Earth Shock 0, was
+    -- 248; one spell alone: not told", the Lightning Bolt cast 35 s before no longer among the
+    -- six spells watched (food and drink cast since), and no alert. In that file no spell but
+    -- Lightning Bolt was ever cast for no mana without Clearcasting on (19 such casts with it).
+    local byId
+    if free == false and spell then
+        local p = ProcSpell()
+        if p and p.name ~= spell.name and ManaCost(p.id) == 0 then free, byId = true, p end
+    end
     if ns.IsLogging and ns.IsLogging() then
         local what = ""
         if spell then
             what = (" (%s 0, was %s; %s)"):format(spell.name, tostring(spell.max),
-                second and ("%s 0, was %s"):format(second.name, tostring(second.max)) or "one spell alone: not told")
+                second and ("%s 0, was %s"):format(second.name, tostring(second.max))
+                or byId and ("%s 0, asked by its ID"):format(byId.name) or "one spell alone: not told")
         end
         local line = ("%s: its buff (%s) hidden by the game %s, on you %s; two watched spells cost no mana %s%s"):format(
             name, tostring(id), tostring(ClearHidden(id)), tostring(byAura), tostring(free), what)

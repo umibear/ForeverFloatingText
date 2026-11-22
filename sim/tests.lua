@@ -3812,6 +3812,37 @@ Test("the proc's spell is kept over a /reload; never learned, or freed by someth
     Eq(ForeverFloatingTextDB.procSpell, nil, "two spells free at once: not learned")
 end)
 
+-- (1.31.34) The 2026-11-22 18:29 log with the game's file, 135034.591: Clearcasting came with a
+-- Fire Nova, "Earth Shock 0, was 248; one spell alone: not told" and no alert: the Lightning Bolt
+-- cast 35 s before was no longer among the six spells watched.
+Test("one watched spell free and the proc's spell free by its ID: Clearcasting; not while that one costs mana", function()
+    NewGame({db = {procSpell = {id = 15208, name = "Lightning Bolt"}}})
+    local cost = {[8042] = 105, [15208] = 215}
+    ProcCosts(cost)
+    At(1, function() Cast(8042) end) -- an Earth Shock: the one spell watched, no Lightning Bolt cast yet
+    At(3, function() cost[8042] = 0; HiddenAdd() end) -- freed alone, Lightning Bolt still at its cost
+    Run(4)
+    Eq(ClearAlerts(), 0, "the proc's spell costs mana: one spell alone says nothing")
+    At(5, function() cost[8042] = 105; HiddenRemove() end)
+    At(7, function() cost[8042], cost[15208] = 0, 0; HiddenAdd() end) -- Clearcasting: both free
+    Run(8)
+    Eq(ClearAlerts(), 1, "Lightning Bolt free too, asked by its ID: Clearcasting")
+    Ok(Logged("asked by its ID"), "and the log says how")
+    At(9, function() cost[8042], cost[15208] = 105, 215; Cast(8042); HiddenRemove() end) -- used up
+    -- "Maelstrom Ready!": Lightning Bolt free, the Earth Shock not
+    At(11, function() cost[15208] = 0; HiddenAdd() end)
+    Run(12)
+    Eq(ClearAlerts(), 1, "the proc's spell free alone: not Clearcasting")
+    -- the proc's spell never learned: one spell alone says nothing, as before
+    NewGame()
+    cost = {[8042] = 105, [15208] = 215}
+    ProcCosts(cost)
+    At(1, function() Cast(8042) end)
+    At(3, function() cost[8042], cost[15208] = 0, 0; HiddenAdd() end)
+    Run(4)
+    Eq(ClearAlerts(), 0, "nothing learned: not told")
+end)
+
 ------------------------------------------------------------------------
 -- Run them
 ------------------------------------------------------------------------
