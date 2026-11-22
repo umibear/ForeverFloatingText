@@ -518,6 +518,7 @@ function FFT:ForgetHots()
     db().dotPeriods = nil
     db().spellSchools = nil
     db().minionSchools = nil
+    db().procSpell = nil -- (1.31.33) the spell the game's proc frees (Procs.lua)
     wipe(periodic)
     wipe(observing)
     Print("forgot everything learned: heal-over-time and damage-over-time rhythms, spell schools.")

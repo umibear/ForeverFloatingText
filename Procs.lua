@@ -67,6 +67,40 @@ local function HasReady()
     if type(n) == "number" then return n >= 5 end
     return true -- on you, its stacks unknown
 end
+-- Maelstrom Weapon's stack count as read: true at 5, false under 5 or not on you, nil when the
+-- buff or its count can't be read
+local function AtFive()
+    local a = ReadAura(MAELSTROM_WEAPON)
+    if a == nil then return nil end
+    if a == false then return false end
+    local n = Plain(a.applications)
+    if type(n) ~= "number" then return nil end
+    return n >= 5
+end
+-- A spell's mana cost now, or nil when the game gives none (a cost that needs a form you aren't in
+-- isn't one). C_Spell.GetSpellPowerCost has no secrecy flag (SpellDocumentation.lua): read in fights too.
+local function ManaCost(id)
+    if not (C_Spell and C_Spell.GetSpellPowerCost) then return nil end
+    local ok, cost = pcall(function()
+        local costs = C_Spell.GetSpellPowerCost(id)
+        if IsSecret(costs) or type(costs) ~= "table" then return nil end
+        local mana = Enum and Enum.PowerType and Enum.PowerType.Mana or 0
+        for _, c in pairs(costs) do
+            if not IsSecret(c) and type(c) == "table" and Plain(c.type) == mana then
+                local needs = Plain(c.requiredAuraID)
+                if not (type(needs) == "number" and needs ~= 0 and Plain(c.hasRequiredAura) == false) then
+                    return Plain(c.cost)
+                end
+            end
+        end
+    end)
+    if ok and type(cost) == "number" then return cost end
+end
+-- (1.31.33) The spell the game's proc makes free, once learned ({id, name}, saved; FFT.ProcLearnSpell)
+local function ProcSpell()
+    local p = FFT.db and FFT.db.procSpell
+    if type(p) == "table" and type(p.id) == "number" and type(p.name) == "string" then return p end
+end
 -- a Maelstrom player: once seen with either buff while readable (saved)
 local function MaelstromSeen()
     local db = FFT.db
@@ -237,6 +271,9 @@ function FFT:OnProcNotice()
     Log("proc notice <%s>", S(name))
     if not (db.enabled and db.showGameProcs) then return end
     self:ProcShow("game", FFT.Color("colorProc"), nil, "%s", {name}, PROC_MAX)
+    -- (1.31.33) which spell it frees: looked for once the frame's costs are in, and a moment later
+    C_Timer.After(0, FFT.ProcLearnSpell)
+    C_Timer.After(0.25, FFT.ProcLearnSpell)
 end
 
 -- What may use the game's notice up: a cast of yours and an aura of yours removed, one frame.
@@ -272,12 +309,49 @@ local function Used()
     local why = ("your %s and an aura of yours removed with it"):format(use.name)
     SeeForm()
     local wasIn = form.before
-    if wasIn == 0 or CastBars()[use.name] then return FFT:ProcEnd("game", why) end
-    C_Timer.After(0, function()
-        SeeForm()
-        if form.now ~= 0 then return FFT:ProcEnd("game", why) end
-        Log("proc game stays: your %s took you out of form %d, the aura removed with it", use.name, wasIn)
-    end)
+    local function ByForm()
+        if wasIn == 0 or CastBars()[use.name] then return FFT:ProcEnd("game", why) end
+        C_Timer.After(0, function()
+            SeeForm()
+            if form.now ~= 0 then return FFT:ProcEnd("game", why) end
+            Log("proc game stays: your %s took you out of form %d, the aura removed with it", use.name, wasIn)
+        end)
+    end
+    -- (1.31.32) While Maelstrom Weapon's stacks can be read they say it themselves: a use takes
+    -- them under 5 in the cast's moment (the game's files: Ready! removed and the stacks to 4 at
+    -- the cast, 16 of 16), so 5 stacks still there a frame after the cast = another aura went with
+    -- it. Looked at a frame later, as the count may be updated after the cast's event; unreadable
+    -- by then (the cast began a fight), as before.
+    -- (1.31.33) In a fight the stacks can't be read, the proc's own spell can: it costs no mana
+    -- while the proc is up. The author's 2026-11-22 10:04 log with the game's file, 104106.157: an
+    -- Earth Shock used up Clearcasting 4.3 s after "Maelstrom Ready!" showed (the feed's buff end
+    -- in the cast's frame) and the text ended; the game kept Ready! 11.2 s more, until a Lightning
+    -- Bolt, cast for no mana, took it. So after a cast of another spell than the proc's: its spell
+    -- still free a frame later = the proc is still there, its spell at a cost again = gone. A cast
+    -- of the proc's own spell is decided as before (it is what uses the proc: every use in the
+    -- author's game files), and so is one while its spell isn't learned or its cost not given.
+    local five = Find("game") and MaelstromSeen() and AtFive() == true
+    local p = Find("game") and ProcSpell()
+    if p and use.name == p.name then p = nil end
+    if five or p then
+        C_Timer.After(0, function()
+            if five then
+                local now = AtFive()
+                if now == true then
+                    return Log("proc game stays: Maelstrom Weapon still at 5 stacks after your %s, the aura removed with it was another", use.name)
+                end
+                if now == false then return FFT:ProcEnd("game", why) end
+            end
+            local cost = p and ManaCost(p.id)
+            if cost == 0 then
+                return Log("proc game stays: %s still costs no mana after your %s, the aura removed with it was another", p.name, use.name)
+            end
+            if cost then return FFT:ProcEnd("game", ("%s; %s costs mana again"):format(why, p.name)) end
+            ByForm()
+        end)
+        return
+    end
+    ByForm()
 end
 
 -- (1.31.6) The feed's SPELL_AURA_END (Alerts.lua OnAuraNotice) counts as a removal too. The author's
@@ -285,9 +359,23 @@ end
 -- frame 11 of 11; once (90392.630) UNIT_AURA's removal came only 0.10 s later, a frame of its own
 -- (the game's file: "Maelstrom Ready!" removed and the stacks down to 4 at the cast, Maelstrom
 -- Weapon removed 0.10 s after), so the text stayed while the stacks built up again, until PROC_MAX.
-function FFT.NoteProcAuraRemoved()
+-- (1.31.32) The feed names a debuff's end apart (SPELL_AURA_END_HARMFUL): a debuff leaving you is no
+-- proc used up. The author's 2026-11-22 08:58 log with the game's file, 100259.999: a Cure Disease
+-- cast on oneself took a mob's disease off, out of combat: the feed's "harmful aura ended", the
+-- cast and UNIT_AURA's one removal in one frame, and the text ended with Maelstrom Weapon at 5
+-- stacks, which the game kept 9.3 s more. The 23 uses of that log each had the feed's buff end in
+-- the cast's frame, before UNIT_AURA; so a frame's removals that the feed's debuff ends account
+-- for, with no buff's end among them, don't count (in combat, where their number is hidden: any).
+local feedEnd = {buff = -100, debuff = -100, debuffs = 0} -- when the feed last named each; debuffs: how many in that frame
+function FFT.NoteProcAuraRemoved(harmful)
     if #rows == 0 then return end
-    lastRemoval = GetTime()
+    local t = GetTime()
+    if harmful then
+        if t - feedEnd.debuff > SAME_FRAME then feedEnd.debuffs = 0 end
+        feedEnd.debuff, feedEnd.debuffs = t, feedEnd.debuffs + 1
+        return
+    end
+    feedEnd.buff, lastRemoval = t, t
     Used()
 end
 
@@ -372,7 +460,16 @@ watch:SetScript("OnEvent", function(_, event, _, a2, a3)
     if IsSecret(info) or type(info) ~= "table" then return end
     local removed = info.removedAuraInstanceIDs
     if IsSecret(removed) or (type(removed) == "table" and #removed > 0) then
-        lastRemoval = GetTime()
+        -- (1.31.32) not the debuffs the feed just named as ended (FFT.NoteProcAuraRemoved)
+        local t = GetTime()
+        if t - feedEnd.debuff <= SAME_FRAME and t - feedEnd.buff > SAME_FRAME
+            and (IsSecret(removed) or #removed <= feedEnd.debuffs) then
+            if Find("game") and t - lastUse.t <= SAME_FRAME then
+                Log("proc game stays: the aura removed with your %s was a debuff (the game's combat text named its end)", lastUse.name)
+            end
+            return
+        end
+        lastRemoval = t
         Used()
     end
 end)
@@ -570,25 +667,6 @@ local function ClearAura(id)
     return type(a) == "table"
 end
 
--- A spell's mana cost now, or nil when the game gives none (a cost that needs a form you aren't in
--- isn't one)
-local function ManaCost(id)
-    if not (C_Spell and C_Spell.GetSpellPowerCost) then return nil end
-    local ok, cost = pcall(function()
-        local costs = C_Spell.GetSpellPowerCost(id)
-        if IsSecret(costs) or type(costs) ~= "table" then return nil end
-        local mana = Enum and Enum.PowerType and Enum.PowerType.Mana or 0
-        for _, c in pairs(costs) do
-            if not IsSecret(c) and type(c) == "table" and Plain(c.type) == mana then
-                local needs = Plain(c.requiredAuraID)
-                if not (type(needs) == "number" and needs ~= 0 and Plain(c.hasRequiredAura) == false) then
-                    return Plain(c.cost)
-                end
-            end
-        end
-    end)
-    if ok and type(cost) == "number" then return cost end
-end
 -- true (and the two spells) when two spells of different names that cost mana cost none now;
 -- false (and the spell, if one) when one alone does or those watched all cost mana; nil when
 -- nothing says. Two ranks of one spell are one spell: a proc that frees it frees both.
@@ -598,8 +676,10 @@ local function FreeCast()
         local cost = ManaCost(s.id)
         if cost and cost > 0 then
             costly = true
+            s.freeSince = nil
             if not s.max or cost > s.max then s.max = cost end
         elseif cost == 0 and s.max then
+            s.freeSince = s.freeSince or GetTime() -- (1.31.33) when it was first read as free
             if not free then free = s
             elseif not second and s.name ~= free.name then second = s end
         end
@@ -607,6 +687,26 @@ local function FreeCast()
     if second then return true, free, second end
     if free or costly then return false, free end
     return nil
+end
+
+-- (1.31.33) The spell the game's proc frees, learned from a notice: one watched spell alone at no
+-- cost (two of different names are Clearcasting's doing), free only since the notice's frame (one
+-- free before it was freed by something else). The author's 2026-11-22 08:58 log: "Lightning Bolt
+-- 0, was 215" 0.009-0.018 s after each of 24 notices, the cost back in the frame of the bolt that
+-- used the proc. Saved (FFT.db.procSpell): after a /reload the watched spells start empty, and the
+-- spell's cost can be asked by its ID alone. A new rank is learned as the old one was.
+function FFT.ProcLearnSpell()
+    local db = FFT.db
+    local r = Find("game")
+    if not (db and r) or r.fading then return end
+    local free, spell, second = FreeCast()
+    if free ~= false or not spell or second then return end
+    if not spell.freeSince or spell.freeSince < r.shownAt - SAME_FRAME then return end
+    local p = db.procSpell
+    if type(p) == "table" and p.id == spell.id then return end
+    db.procSpell = {id = spell.id, name = spell.name}
+    Log("proc game frees %s (spell %s: 0 mana, was %s): from now on, after a cast of another spell, its cost says whether the proc is still up",
+        spell.name, tostring(spell.id), tostring(spell.max))
 end
 
 local function ClearLook()

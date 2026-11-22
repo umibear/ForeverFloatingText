@@ -63,8 +63,9 @@ function FFT:OnAuraNotice(kind)
     local how = AURA_TEXT[kind]
     if not how then return end
     feedAuraAt[how.fades and "removed" or "added"] = GetTime()
-    -- (1.31.6) a buff of yours ended: may be a proc used up (Procs.lua)
-    if kind == "SPELL_AURA_END" and self.NoteProcAuraRemoved then self.NoteProcAuraRemoved() end
+    -- (1.31.6) a buff of yours ended: may be a proc used up (Procs.lua); (1.31.32) a debuff's end
+    -- is told too, as one: an aura of yours going with it is no proc's
+    if how.fades and self.NoteProcAuraRemoved then self.NoteProcAuraRemoved(kind == "SPELL_AURA_END_HARMFUL") end
     if not (C_CombatText and C_CombatText.GetCurrentEventInfo) then return end
     local ok, name = pcall(C_CombatText.GetCurrentEventInfo)
     if not ok then return end

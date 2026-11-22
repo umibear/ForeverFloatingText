@@ -3671,6 +3671,148 @@ Test("a spell cast with its cast bar doesn't use up the game's proc; the next in
 end)
 
 ------------------------------------------------------------------------
+-- (1.31.32) The 2026-11-22 08:58 log with the game's file, 100259.999: Cure Disease on oneself
+-- took a mob's disease off 23.6 s after "Maelstrom Ready!" showed; the feed's SPELL_AURA_END_HARMFUL,
+-- the cast and UNIT_AURA's removal (one id, readable out of combat) in one frame ended the text,
+-- Maelstrom Weapon at 5 stacks for 9.3 s more
+------------------------------------------------------------------------
+local function Logged(text)
+    for _, l in ipairs(ForeverFloatingTextLog.lines) do if l:find(text, 1, true) then return true end end
+    return false
+end
+Test("a debuff cured off yourself doesn't use up the game's proc; a buff ending with a cast still does", function()
+    NewGame()
+    SIM.spells[403] = {name = "Lightning Bolt", harmful = true}
+    SIM.spells[2870] = {name = "Cure Disease", helpful = true}
+    local function DebuffGone() Feed("SPELL_AURA_END_HARMFUL", SIM.Secret("Maggot Slime")) end
+    local function Removed(...) SIM.Fire("UNIT_AURA", "player", {removedAuraInstanceIDs = {...}}) end
+    At(1, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")) end)
+    At(2, function() DebuffGone(); Cast(2870); Removed(321) end) -- out of combat, as in the log
+    At(3, function() DebuffGone(); Cast(2870); HiddenRemove() end) -- in a fight: the removal hidden
+    Run(4)
+    Eq(ProcsUp(), "game", "still up after both cures")
+    Ok(Logged("was a debuff"), "and the log says why")
+    -- a buff went in that frame too (two removals, one debuff named): that still counts
+    At(5, function() DebuffGone(); Cast(2870); Removed(321, 322) end)
+    Run(6)
+    Eq(ProcsUp(), "", "a second aura gone with the cast ends it")
+    -- the bolt uses it in the frame a debuff runs out: the feed names the buff's end too
+    At(7, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")) end)
+    At(8, function() DebuffGone(); Cast(403); Feed("SPELL_AURA_END", SIM.Secret("Maelstrom Ready!")); HiddenRemove() end)
+    Run(9)
+    Eq(ProcsUp(), "", "used up by the Lightning Bolt")
+    -- a debuff's end in an earlier frame says nothing about this one
+    At(10, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")) end)
+    At(11, function() DebuffGone() end)
+    At(12, function() Cast(403); HiddenRemove() end)
+    Run(13)
+    Eq(ProcsUp(), "", "the bolt a second after a debuff ended uses it")
+end)
+
+Test("while Maelstrom Weapon reads 5 stacks, a cast with another aura removed doesn't end its notice", function()
+    NewGame({db = {maelstromSeen = true}})
+    SIM.spells[403] = {name = "Lightning Bolt", harmful = true}
+    local s = {hidden = false, stacks = 5}
+    Maelstrom(s)
+    local function Removed(id) SIM.Fire("UNIT_AURA", "player", {removedAuraInstanceIDs = {id}}) end
+    At(1, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")) end)
+    At(3, function() Cast(8042); Removed(7) end) -- a Shock, another buff of yours gone with it
+    Run(4)
+    Eq(ProcsUp(), "game", "5 stacks after the Shock: still up")
+    Ok(Logged("still at 5 stacks"), "and the log says why")
+    -- the bolt, right after the notice (before the stacks' own check counts): the count read in
+    -- the cast's frame may still be 5, a frame later it isn't
+    At(5, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")) end)
+    At(5.2, function() Cast(403); Removed(8); s.stacks = 4 end)
+    Run(5.4)
+    Eq(ProcsUp(), "", "under 5 stacks a frame after the bolt: used up")
+    -- a cast that starts a fight: the stacks unreadable a frame later, decided as before
+    s.stacks = 5
+    At(10, function() Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")) end)
+    At(12, function() Cast(8042); HiddenRemove(); s.hidden = true end)
+    Run(13)
+    Eq(ProcsUp(), "", "unreadable after the cast: a cast with a removal ends it, as in a fight")
+    C_Secrets, C_UnitAuras = nil, nil
+end)
+
+------------------------------------------------------------------------
+-- (1.31.33) The 2026-11-22 10:04 log with the game's file, 104106.157: an Earth Shock used up
+-- Clearcasting 4.3 s after "Maelstrom Ready!" showed, the feed's buff end in its frame, and the
+-- text ended; the game kept Ready! 11.2 s more, until a Lightning Bolt cast for no mana. The
+-- 08:58 log: "Lightning Bolt 0, was 215" just after each of 24 notices, until the bolt's cast.
+------------------------------------------------------------------------
+local function ProcCosts(cost)
+    Shaman()
+    SIM.spells[16246] = {name = "Clearcasting"}
+    SIM.spells[15208] = {name = "Lightning Bolt", harmful = true}
+    Costs(cost)
+    return function() cost[15208] = 0; Feed("SPELL_CAST", SIM.Secret("Maelstrom Ready!")); HiddenAdd() end, -- the 5th stack
+        function() Feed("SPELL_AURA_END", SIM.Secret("Clearcasting")); HiddenRemove() end -- another buff of yours gone
+end
+Test("a Shock using up another buff leaves the game's proc up while the proc's spell still costs no mana", function()
+    NewGame()
+    local cost = {[8042] = 105, [15208] = 215}
+    local Notice, BuffGone = ProcCosts(cost)
+    At(1, function() Cast(8042) end)
+    At(1.5, function() Cast(15208) end) -- both spells' costs known from here on
+    At(3, Notice)
+    Run(4)
+    local p = ForeverFloatingTextDB.procSpell
+    Eq(p and p.name, "Lightning Bolt", "the proc's spell learned: the one free since the notice")
+    Eq(p and p.id, 15208, "by its ID")
+    At(5, function() Cast(8042); BuffGone() end) -- the Earth Shock that used up Clearcasting
+    Run(6)
+    Eq(ProcsUp(), "game", "still up: Lightning Bolt still free")
+    Ok(Logged("still costs no mana"), "and the log says why")
+    At(7, function() cost[15208] = 215; Cast(15208); BuffGone() end)
+    Run(8)
+    Eq(ProcsUp(), "", "used up by the Lightning Bolt")
+    -- the proc gone unseen (its spell at a cost again): the next cast with a removal ends it
+    At(9, Notice)
+    At(10, function() cost[15208] = 215 end)
+    At(11, function() Cast(8042); BuffGone() end)
+    Run(12)
+    Eq(ProcsUp(), "", "Lightning Bolt costs mana again: ended")
+    Ok(Logged("costs mana again"), "and the log says so")
+end)
+
+Test("the proc's spell is kept over a /reload; never learned, or freed by something else, it decides nothing", function()
+    -- right after a /reload: no spell cast yet, the saved one asked by its ID
+    NewGame({db = {procSpell = {id = 15208, name = "Lightning Bolt"}}})
+    local Notice, BuffGone = ProcCosts({[8042] = 105, [15208] = 215})
+    At(1, Notice)
+    At(2, function() Cast(8042); BuffGone() end)
+    Run(3)
+    Eq(ProcsUp(), "game", "the saved spell still free: up")
+    -- never learned (the 10:04 log's first proc: no Lightning Bolt cast since the /reload): as before
+    NewGame()
+    Notice, BuffGone = ProcCosts({[8042] = 105, [15208] = 215})
+    At(1, Notice)
+    At(2, function() Cast(8042); BuffGone() end)
+    Run(3)
+    Eq(ForeverFloatingTextDB.procSpell, nil, "nothing watched: nothing learned")
+    Eq(ProcsUp(), "", "a cast with a removal ends it, as before")
+    -- a spell already free when the notice comes (Clearcasting on you, one spell watched) isn't the proc's
+    NewGame()
+    local cost = {[8042] = 105, [15208] = 215}
+    Notice = ProcCosts(cost)
+    At(1, function() Cast(8042) end)
+    At(2, function() cost[8042] = 0; HiddenAdd() end) -- Clearcasting
+    At(3, Notice)
+    Run(4)
+    Eq(ForeverFloatingTextDB.procSpell, nil, "free before the notice: not learned")
+    -- two spells free from the notice's frame on: Clearcasting came with it, nothing learned
+    NewGame()
+    cost = {[8042] = 105, [15208] = 215}
+    Notice = ProcCosts(cost)
+    At(1, function() Cast(8042) end)
+    At(1.5, function() Cast(15208) end)
+    At(3, function() cost[8042] = 0; Notice() end)
+    Run(4)
+    Eq(ForeverFloatingTextDB.procSpell, nil, "two spells free at once: not learned")
+end)
+
+------------------------------------------------------------------------
 -- Run them
 ------------------------------------------------------------------------
 -- `lua5.3 sim/tests.lua <text>`: only the tests whose name holds the text, with the addon's log
